@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,6 +122,33 @@ async def test_build_prompt_marks_commands_and_prefixes_context(tmp_path: Path) 
     prompt_lines = normal_prompt.splitlines()
     assert prompt_lines[0] == normal.context_str
     assert prompt_lines[2] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_uses_system_timezone_for_context_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available on this platform")
+
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    time.tzset()
+    try:
+        _, impl, _ = _build_impl(tmp_path)
+        message = ChannelMessage(session_id="s", channel="cli", chat_id="room", content="hello")
+
+        prompt = await impl.build_prompt(message, session_id="s", state={})
+
+        date_line = prompt.splitlines()[1]
+        assert date_line.startswith("---Date: ")
+        assert date_line.endswith("+08:00---")
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
 
 
 @pytest.mark.asyncio
