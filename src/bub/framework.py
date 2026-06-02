@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,15 @@ if TYPE_CHECKING:
 load_dotenv()
 DEFAULT_HOME = Path.home() / ".bub"
 DEFAULT_CONFIG_FILE = (DEFAULT_HOME / "config.yml").resolve()
+
+
+def _clear_plugin_modules(entry_point_value: str) -> None:
+    """Remove plugin modules from sys.modules to allow re-import."""
+    module_name = entry_point_value.split(":")[0]
+    root = module_name.split(".")[0]
+    to_remove = [key for key in sys.modules if key == root or key.startswith(f"{root}.")]
+    for key in to_remove:
+        del sys.modules[key]
 
 
 @dataclass(frozen=True)
