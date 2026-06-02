@@ -3,12 +3,9 @@ from __future__ import annotations
 
 import importlib.metadata
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from bub.framework import BubFramework
-from bub.hookspecs import hookimpl
-from bub.tools import REGISTRY
 
 
 def test_load_hooks_tracks_plugin_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -17,7 +14,11 @@ def test_load_hooks_tracks_plugin_tools(monkeypatch: pytest.MonkeyPatch) -> None
 
     class ToolPlugin:
         def __init__(self, fw):
-            pass
+            from bub.tools import tool as bub_tool
+
+            @bub_tool(name="my_test_tool")
+            def my_tool() -> str:
+                return "done"
 
     entry_point = SimpleNamespace(
         name="tool-plugin",
@@ -30,3 +31,4 @@ def test_load_hooks_tracks_plugin_tools(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert "tool-plugin" in framework._plugin_tools
     assert "builtin" in framework._plugin_tools
+    assert "my_test_tool" in framework._plugin_tools["tool-plugin"]
