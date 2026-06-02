@@ -20,6 +20,7 @@ from bub import configure
 from bub.envelope import content_of, field_of, unpack_batch
 from bub.hook_runtime import _SKIP_VALUE, HookRuntime
 from bub.hookspecs import BUB_HOOK_NAMESPACE, BubHookSpecs
+from bub.tools import REGISTRY
 from bub.turn_admission import AdmitDecision, SteeringBuffer, TurnSnapshot
 from bub.types import Envelope, MessageHandler, OutboundChannelRouter, TurnResult
 
@@ -48,6 +49,7 @@ class BubFramework:
         self._plugin_manager.add_hookspecs(BubHookSpecs)
         self._hook_runtime = HookRuntime(self._plugin_manager)
         self._plugin_status: dict[str, PluginStatus] = {}
+        self._plugin_tools: dict[str, set[str]] = {}
         self._outbound_router: OutboundChannelRouter | None = None
         self._steering_buffers: dict[str, SteeringBuffer] = {}
         self._tape_store: TapeStore | AsyncTapeStore | None = None
@@ -71,6 +73,9 @@ class BubFramework:
         pending_plugins: list[tuple[str, Any]] = []
 
         self._load_builtin_hooks()
+        # Track builtin tools
+        self._plugin_tools["builtin"] = set(REGISTRY.keys())
+
         for entry_point in importlib.metadata.entry_points(group="bub"):
             try:
                 plugin = entry_point.load()
@@ -82,9 +87,12 @@ class BubFramework:
 
         for plugin_name, plugin in pending_plugins:
             try:
+                before = set(REGISTRY.keys())
                 if callable(plugin):  # Support entry points that are classes
                     plugin = plugin(self)
                 self._plugin_manager.register(plugin, name=plugin_name)
+                after = set(REGISTRY.keys())
+                self._plugin_tools[plugin_name] = after - before
             except Exception as exc:
                 logger.warning(f"Failed to initialize plugin '{plugin_name}': {exc}")
                 self._plugin_status[plugin_name] = PluginStatus(is_success=False, detail=str(exc))
