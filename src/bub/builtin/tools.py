@@ -305,6 +305,7 @@ def show_help() -> str:
         "  ,bash cmd='sleep 5' background=true\n"
         "  ,bash.output shell_id=bsh-12345678\n"
         "  ,bash.kill shell_id=bsh-12345678\n"
+        "  ,reload.plugins\n"
         "  ,quit\n"
         "Any unknown command after ',' is executed as shell via bash."
     )
@@ -318,6 +319,21 @@ async def quit_tool(*, context: ToolContext) -> str:
     await shell_manager.terminate_session(session_id)
     await agent.framework.quit_via_router(session_id)
     return "Session tasks stopped."
+
+
+@tool(name="reload.plugins", context=True)
+async def reload_plugins(*, context: ToolContext) -> str:
+    """Reload external plugins without restarting the process."""
+    agent = _get_agent(context)
+    status = await asyncio.to_thread(agent.framework.reload_hooks)
+    ok = sum(1 for plugin_status in status.values() if plugin_status.is_success)
+    failed = len(status) - ok
+    lines = [f"Plugins reloaded ({ok} ok, {failed} failed):"]
+    for name, plugin_status in status.items():
+        marker = "✓" if plugin_status.is_success else "✗"
+        detail = f": {plugin_status.detail}" if plugin_status.detail else ""
+        lines.append(f"  {marker} {name}{detail}")
+    return "\n".join(lines)
 
 
 def _resolve_path(context: ToolContext, raw_path: str) -> Path:
