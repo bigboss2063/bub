@@ -32,3 +32,23 @@ def test_load_hooks_tracks_plugin_tools(monkeypatch: pytest.MonkeyPatch) -> None
     assert "tool-plugin" in framework._plugin_tools
     assert "builtin" in framework._plugin_tools
     assert "my_test_tool" in framework._plugin_tools["tool-plugin"]
+
+
+def test_clear_plugin_modules_removes_cached_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_clear_plugin_modules should remove plugin modules from sys.modules."""
+    import sys
+    from bub.framework import _clear_plugin_modules
+
+    # Simulate cached plugin modules
+    sys.modules["fake_plugin"] = type(sys)("fake_plugin")
+    sys.modules["fake_plugin.sub"] = type(sys)("fake_plugin.sub")
+    sys.modules["unrelated"] = type(sys)("unrelated")
+
+    _clear_plugin_modules("fake_plugin:SomeClass")
+
+    assert "fake_plugin" not in sys.modules
+    assert "fake_plugin.sub" not in sys.modules
+    assert "unrelated" in sys.modules  # untouched
+
+    # Cleanup
+    sys.modules.pop("unrelated", None)
