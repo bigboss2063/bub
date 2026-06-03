@@ -80,9 +80,11 @@ class BubFramework:
     def load_hooks(self) -> None:
         import importlib.metadata
 
+        pre_builtin = set(REGISTRY.keys())
         self._load_builtin_hooks()
-        # Track builtin tools
-        self._plugin_tools["builtin"] = set(REGISTRY.keys())
+        # Track only the tools the builtin plugin actually added, not whatever
+        # REGISTRY happened to contain before load_hooks ran.
+        self._plugin_tools["builtin"] = set(REGISTRY.keys()) - pre_builtin
 
         for entry_point in importlib.metadata.entry_points(group="bub"):
             before = set(REGISTRY.keys())
@@ -92,7 +94,7 @@ class BubFramework:
                     plugin = plugin(self)
                 self._plugin_manager.register(plugin, name=entry_point.name)
             except Exception as exc:
-                logger.warning(f"Failed to initialize plugin '{entry_point.name}': {exc}")
+                logger.warning(f"Failed to load plugin '{entry_point.name}': {exc}")
                 for tool_name in set(REGISTRY.keys()) - before:
                     REGISTRY.pop(tool_name, None)
                 self._plugin_status[entry_point.name] = PluginStatus(is_success=False, detail=str(exc))
@@ -128,24 +130,19 @@ class BubFramework:
                 REGISTRY[tool_name] = tool_obj
         self._plugin_tools[plugin_name] = old_tools.get(plugin_name, set())
 
-    def _reload_plugin_from_entry_point(self, entry_point: Any) -> set[str]:
+    def _reload_plugin_from_entry_point(self, entry_point: Any) -> None:
         import importlib
 
-        before = set(REGISTRY.keys())
         _clear_plugin_modules(entry_point.value)
         importlib.invalidate_caches()
         plugin = entry_point.load()
         if callable(plugin):
             plugin = plugin(self)
         self._plugin_manager.register(plugin, name=entry_point.name)
-        return set(REGISTRY.keys()) - before
 
     def reload_hooks(self) -> dict[str, PluginStatus]:
         """Reload external plugins while preserving builtins and rollback on failure."""
-        import importlib
         import importlib.metadata
-
-        importlib.invalidate_caches()
 
         old_plugins, old_tools, old_tool_objects = self._unload_external_plugins()
 
@@ -155,13 +152,17 @@ class BubFramework:
 
         for entry_point in importlib.metadata.entry_points(group="bub"):
             plugin_name = entry_point.name
+            before = set(REGISTRY.keys())
             try:
-                self._plugin_tools[plugin_name] = self._reload_plugin_from_entry_point(entry_point)
+                self._reload_plugin_from_entry_point(entry_point)
             except Exception as exc:
                 logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
+                for tool_name in set(REGISTRY.keys()) - before:
+                    REGISTRY.pop(tool_name, None)
                 self._restore_plugin(plugin_name, old_plugins, old_tools, old_tool_objects)
                 reloaded_status[plugin_name] = PluginStatus(is_success=False, detail=str(exc))
             else:
+                self._plugin_tools[plugin_name] = set(REGISTRY.keys()) - before
                 reloaded_status[plugin_name] = PluginStatus(is_success=True)
 
         self._plugin_status = reloaded_status

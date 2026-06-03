@@ -177,8 +177,75 @@ def test_reload_hooks_removes_old_tools_and_registers_new_ones(monkeypatch: pyte
     REGISTRY.pop("plugin_v2_tool", None)
 
 
-def test_reload_hooks_with_no_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """reload_hooks with only builtin plugins should return status without error."""
+def test_reload_plugins_drops_orphaned_tools_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If a renamed tool is registered in __init__ and reload fails, the new tool
+    must not leak into REGISTRY and the old tool must be restored."""
+    from bub.tools import REGISTRY
+
+    framework = BubFramework()
+
+    class PluginV1:
+        def __init__(self, fw):
+            pass
+
+    call_count = [0]
+    fail_next_register = [False]
+
+    def load_plugin():
+        from bub.tools import tool as bub_tool
+
+        call_count[0] += 1
+        if call_count[0] == 1:
+
+            @bub_tool(name="renamed_plugin_old")
+            def old_tool() -> str:
+                return "v1"
+        else:
+
+            @bub_tool(name="renamed_plugin_new")
+            def new_tool() -> str:
+                return "v2"
+            fail_next_register[0] = True
+
+        return PluginV1
+
+    def failing_register(plugin, name):
+        if fail_next_register[0] and name == "renamed-plugin":
+            fail_next_register[0] = False
+            raise RuntimeError("register blew up")
+        return original_register(plugin, name=name)
+
+    entry_point = SimpleNamespace(
+        name="renamed-plugin",
+        load=load_plugin,
+        value="renamed_plugin:PluginV1",
+    )
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+    framework.load_hooks()
+
+    assert "renamed_plugin_old" in REGISTRY
+    assert "renamed_plugin_new" not in REGISTRY
+
+    # Force the reload's register() to fail so the new tool added in __init__
+    # would otherwise be left behind in REGISTRY. The restore call must still
+    # succeed.
+    original_register = framework._plugin_manager.register
+    framework._plugin_manager.register = failing_register  # type: ignore[method-assign]
+
+    try:
+        status = framework.reload_plugins()
+    finally:
+        framework._plugin_manager.register = original_register  # type: ignore[method-assign]
+
+    assert status["renamed-plugin"].is_success is False
+    assert "renamed_plugin_new" not in REGISTRY, "orphaned tool leaked into REGISTRY"
+    assert "renamed_plugin_old" in REGISTRY, "old tool not restored after rollback"
+
+    REGISTRY.pop("renamed_plugin_old", None)
+
+
+def test_reload_plugins_with_no_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reload_plugins with only builtin plugins should return status without error."""
     framework = BubFramework()
     monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [])
 
