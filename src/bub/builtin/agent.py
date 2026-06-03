@@ -317,6 +317,21 @@ class Agent:
                 raise
 
             outcome = _resolve_tool_auto_result(output)
+            if agent_state is not None and agent_state.tools_terminated:
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                await self.tapes.append_event(
+                    tape.name,
+                    "loop.step",
+                    {
+                        "step": step,
+                        "elapsed_ms": elapsed_ms,
+                        "status": "ok",
+                        "date": datetime.now(UTC).isoformat(),
+                    },
+                )
+                if outcome.kind == "text" and outcome.text:
+                    return outcome.text
+                return "Task completed by tool hook."
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if outcome.kind == "text":
                 await self.tapes.append_event(
@@ -439,6 +454,10 @@ class Agent:
 
             state.error = output.error
             state.usage = output.usage
+
+            if agent_state is not None and agent_state.tools_terminated:
+                return
+
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if outcome.kind == "text":
                 await self.tapes.append_event(
@@ -571,6 +590,11 @@ class Agent:
             tools = [tool for tool in REGISTRY.values() if tool.name in allowed_tools]
         else:
             tools = list(REGISTRY.values())
+        wrapped_tools = tools
+        if agent_state is not None:
+            wrapped_tools = self._wrap_tools_with_hooks(
+                session_id=session_id, tools=tools, agent_state=agent_state,
+            )
         async with asyncio.timeout(self.settings.model_timeout_seconds):
             if stream_output:
                 return await tape.stream_events_async(
@@ -579,7 +603,7 @@ class Agent:
                         prompt_text, state=tape.context.state, allowed_skills=allowed_skills, tools=tools
                     ),
                     max_tokens=self.settings.max_tokens,
-                    tools=model_tools(tools),
+                    tools=model_tools(wrapped_tools),
                     model=model,
                 )
             else:
@@ -589,7 +613,7 @@ class Agent:
                         prompt_text, state=tape.context.state, allowed_skills=allowed_skills, tools=tools
                     ),
                     max_tokens=self.settings.max_tokens,
-                    tools=model_tools(tools),
+                    tools=model_tools(wrapped_tools),
                     model=model,
                 )
 
@@ -643,11 +667,11 @@ class Agent:
                         )
                         before_results = []
 
-                    for result in before_results:
-                        if isinstance(result, dict) and result.get("block"):
+                    for r in before_results:
+                        if isinstance(r, dict) and r.get("block"):
                             raise RepublicError(
                                 kind=ErrorKind.TOOL,
-                                message=result.get("reason", "blocked by plugin"),
+                                message=r.get("reason", "blocked by plugin"),
                             )
 
                     # --- original handler ---
