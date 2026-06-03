@@ -32,16 +32,16 @@
 3. 注册后：再次快照 `set(REGISTRY.keys())`
 4. 差集 `after - before` 存入 `_plugin_tools[plugin_name]`
 
-内置插件（name=`"builtin"`）也遵循此流程，但 `reload_hooks()` 会跳过它。
+内置插件（name=`"builtin"`）也遵循此流程，但 `reload_plugins()` 会跳过它。
 
 **限制**：只追踪通过 `@tool()` 装饰器在注册期间添加的工具。插件在注册完成后动态修改 REGISTRY 的情况无法追踪。
 
-### 2. `BubFramework.reload_hooks()` 方法
+### 2. `BubFramework.reload_plugins()` 方法
 
 在 `framework.py` 上新增同步方法：
 
 ```python
-def reload_hooks(self) -> dict[str, PluginStatus]:
+def reload_plugins(self) -> dict[str, PluginStatus]:
 ```
 
 **流程：**
@@ -79,7 +79,7 @@ def reload_hooks(self) -> dict[str, PluginStatus]:
 async def reload_plugins(*, context: ToolContext) -> str:
     """Reload external plugins without restarting the process."""
     agent = _get_agent(context)
-    status = await asyncio.to_thread(agent.framework.reload_hooks)
+    status = await asyncio.to_thread(agent.framework.reload_plugins)
     # 格式化输出
     lines = []
     ok = sum(1 for s in status.values() if s.is_success)
@@ -126,7 +126,7 @@ def _clear_plugin_modules(entry_point_value: str) -> None:
 
 | 文件 | 变更 |
 |------|------|
-| `src/bub/framework.py` | 新增 `_plugin_tools` dict；修改 `load_hooks()` 追踪工具；新增 `reload_hooks()` 方法 |
+| `src/bub/framework.py` | 新增 `_plugin_tools` dict；修改 `load_hooks()` 追踪工具；新增 `reload_plugins()` 方法 |
 | `src/bub/builtin/tools.py` | 新增 `reload.plugins` 工具；更新 `show_help()` |
 | `tests/test_reload_plugins.py` | 新增测试文件 |
 

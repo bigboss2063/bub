@@ -4,7 +4,7 @@
 
 **Goal:** 为 bub 运行时添加 `,reload.plugins` 内部命令，支持在不重启进程的情况下热重载外部插件。
 
-**Architecture:** 在 `BubFramework` 中追踪每个插件引入的 REGISTRY 工具（通过快照 diff），新增 `reload_hooks()` 方法执行"注销→清除→重新发现→重新注册"流程，单个插件失败时回滚到旧版本。通过 `builtin/tools.py` 暴露为 `,reload.plugins` 内部命令。
+**Architecture:** 在 `BubFramework` 中追踪每个插件引入的 REGISTRY 工具（通过快照 diff），新增 `reload_plugins()` 方法执行"注销→清除→重新发现→重新注册"流程，单个插件失败时回滚到旧版本。通过 `builtin/tools.py` 暴露为 `,reload.plugins` 内部命令。
 
 **Tech Stack:** Python 3.12+, pluggy, pytest, monkeypatch
 
@@ -199,7 +199,7 @@ git commit -m "feat(framework): add _clear_plugin_modules helper"
 
 ---
 
-### Task 3: 实现 BubFramework.reload_hooks() 方法
+### Task 3: 实现 BubFramework.reload_plugins() 方法
 
 **Files:**
 - Modify: `src/bub/framework.py`
@@ -210,8 +210,8 @@ git commit -m "feat(framework): add _clear_plugin_modules helper"
 在 `tests/test_reload_plugins.py` 中添加：
 
 ```python
-def test_reload_hooks_reregisters_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """reload_hooks should unregister and re-register external plugins."""
+def test_reload_plugins_reregisters_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reload_plugins should unregister and re-register external plugins."""
     framework = BubFramework()
 
     class PluginV1:
@@ -235,7 +235,7 @@ def test_reload_hooks_reregisters_external_plugins(monkeypatch: pytest.MonkeyPat
     assert "v1" in prompt
 
     # Reload — entry_point still returns PluginV1
-    status = framework.reload_hooks()
+    status = framework.reload_plugins()
 
     assert status["my-plugin"].is_success is True
     prompt = framework.get_system_prompt(prompt="hello", state={})
@@ -244,13 +244,13 @@ def test_reload_hooks_reregisters_external_plugins(monkeypatch: pytest.MonkeyPat
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run python -m pytest tests/test_reload_plugins.py::test_reload_hooks_reregisters_external_plugins -v`
-Expected: FAIL — `AttributeError: 'BubFramework' object has no attribute 'reload_hooks'`
+Run: `uv run python -m pytest tests/test_reload_plugins.py::test_reload_plugins_reregisters_external_plugins -v`
+Expected: FAIL — `AttributeError: 'BubFramework' object has no attribute 'reload_plugins'`
 
 - [ ] **Step 3: 编写测试——单个插件失败回滚**
 
 ```python
-def test_reload_hooks_keeps_old_plugin_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reload_plugins_keeps_old_plugin_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """If a plugin fails to reload, its old version should be preserved."""
     framework = BubFramework()
 
@@ -282,7 +282,7 @@ def test_reload_hooks_keeps_old_plugin_on_failure(monkeypatch: pytest.MonkeyPatc
 
     entry_point.load = failing_load
 
-    status = framework.reload_hooks()
+    status = framework.reload_plugins()
 
     assert status["my-plugin"].is_success is False
     assert "plugin broke" in status["my-plugin"].detail
@@ -293,15 +293,15 @@ def test_reload_hooks_keeps_old_plugin_on_failure(monkeypatch: pytest.MonkeyPatc
 
 - [ ] **Step 4: 运行测试确认失败**
 
-Run: `uv run python -m pytest tests/test_reload_plugins.py::test_reload_hooks_keeps_old_plugin_on_failure -v`
-Expected: FAIL — `AttributeError: 'BubFramework' object has no attribute 'reload_hooks'`
+Run: `uv run python -m pytest tests/test_reload_plugins.py::test_reload_plugins_keeps_old_plugin_on_failure -v`
+Expected: FAIL — `AttributeError: 'BubFramework' object has no attribute 'reload_plugins'`
 
-- [ ] **Step 5: 实现 reload_hooks 方法**
+- [ ] **Step 5: 实现 reload_plugins 方法**
 
 在 `src/bub/framework.py` 的 `BubFramework` 类中，在 `load_hooks` 方法之后添加：
 
 ```python
-def reload_hooks(self) -> dict[str, PluginStatus]:
+def reload_plugins(self) -> dict[str, PluginStatus]:
     """Reload external plugins while preserving builtins.
 
     For each external plugin: unregister from pluggy, remove its tracked
@@ -363,7 +363,7 @@ def reload_hooks(self) -> dict[str, PluginStatus]:
 将 Task 3 Step 5 中的回滚逻辑改为更完整的版本。在删除工具时保存 Tool 对象：
 
 ```python
-def reload_hooks(self) -> dict[str, PluginStatus]:
+def reload_plugins(self) -> dict[str, PluginStatus]:
     """Reload external plugins while preserving builtins."""
     import importlib
     import sys
@@ -423,7 +423,7 @@ Expected: ALL PASS
 
 ```bash
 git add src/bub/framework.py tests/test_reload_plugins.py
-git commit -m "feat(framework): add reload_hooks method with per-plugin rollback"
+git commit -m "feat(framework): add reload_plugins method with per-plugin rollback"
 ```
 
 ---
@@ -436,7 +436,7 @@ git commit -m "feat(framework): add reload_hooks method with per-plugin rollback
 - [ ] **Step 1: 编写测试——工具清理和替换**
 
 ```python
-def test_reload_hooks_removes_old_tools_and_registers_new_ones(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reload_plugins_removes_old_tools_and_registers_new_ones(monkeypatch: pytest.MonkeyPatch) -> None:
     """After reload, old plugin tools should be gone and new ones registered."""
     framework = BubFramework()
 
@@ -478,7 +478,7 @@ def test_reload_hooks_removes_old_tools_and_registers_new_ones(monkeypatch: pyte
     assert "plugin_v1_tool" in REGISTRY
     assert "plugin_v2_tool" not in REGISTRY
 
-    framework.reload_hooks()
+    framework.reload_plugins()
 
     assert "plugin_v1_tool" not in REGISTRY
     assert "plugin_v2_tool" in REGISTRY
@@ -490,12 +490,12 @@ def test_reload_hooks_removes_old_tools_and_registers_new_ones(monkeypatch: pyte
 - [ ] **Step 2: 编写测试——无外部插件时 reload 不报错**
 
 ```python
-def test_reload_hooks_with_no_external_plugins() -> None:
-    """reload_hooks with only builtin plugins should return status without error."""
+def test_reload_plugins_with_no_external_plugins() -> None:
+    """reload_plugins with only builtin plugins should return status without error."""
     framework = BubFramework()
     framework.load_hooks()
 
-    status = framework.reload_hooks()
+    status = framework.reload_plugins()
 
     assert "builtin" in status
     assert status["builtin"].is_success is True
@@ -552,7 +552,7 @@ async def test_reload_plugins_tool_returns_formatted_report(tmp_path) -> None:
         run_id="test",
     )
 
-    with patch.object(framework, "reload_hooks", return_value=expected_status):
+    with patch.object(framework, "reload_plugins", return_value=expected_status):
         result = await reload_plugins.run(context=context)
 
     assert "2 ok, 1 failed" in result
@@ -576,7 +576,7 @@ Expected: FAIL — `ImportError: cannot import name 'reload_plugins'`
 async def reload_plugins(*, context: ToolContext) -> str:
     """Reload external plugins without restarting the process."""
     agent = _get_agent(context)
-    status = await asyncio.to_thread(agent.framework.reload_hooks)
+    status = await asyncio.to_thread(agent.framework.reload_plugins)
     lines = []
     ok = sum(1 for s in status.values() if s.is_success)
     failed = len(status) - ok
