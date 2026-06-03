@@ -316,7 +316,6 @@ class Agent:
                 )
                 raise
 
-            outcome = _resolve_tool_auto_result(output)
             if agent_state is not None and agent_state.tools_terminated:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
                 await self.tapes.append_event(
@@ -329,9 +328,10 @@ class Agent:
                         "date": datetime.now(UTC).isoformat(),
                     },
                 )
-                if outcome.kind == "text" and outcome.text:
-                    return outcome.text
+                if output.kind == "text" and output.text:
+                    return str(output.text)
                 return "Task completed by tool hook."
+            outcome = _resolve_tool_auto_result(output)
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if outcome.kind == "text":
                 await self.tapes.append_event(
@@ -679,8 +679,9 @@ class Agent:
                     result: Any = None
                     try:
                         result = await orig(*args, **kwargs)
-                    except Exception:
+                    except Exception as exc:
                         is_error = True
+                        result = exc
 
                     # --- after_tool_call hooks ---
                     try:
