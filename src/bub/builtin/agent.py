@@ -112,7 +112,8 @@ class Agent:
             if isinstance(prompt, str) and prompt.strip().startswith(","):
                 return await self._run_command(tape=tape, line=prompt.strip())
             return await self._agent_loop(
-                tape=tape, prompt=prompt, model=model, allowed_skills=allowed_skills, allowed_tools=allowed_tools
+                tape=tape, prompt=prompt, model=model, allowed_skills=allowed_skills, allowed_tools=allowed_tools,
+                session_id=session_id,
             )
 
     async def run_stream(
@@ -154,6 +155,7 @@ class Agent:
                 allowed_skills=allowed_skills,
                 allowed_tools=allowed_tools,
                 stream_output=True,
+                session_id=session_id,
             )
         return self._events_with_callback(events, callback=stack.aclose)
 
@@ -207,6 +209,7 @@ class Agent:
         allowed_skills: Collection[str] | None = ...,
         allowed_tools: Collection[str] | None = ...,
         stream_output: Literal[False] = ...,
+        session_id: str = ...,
     ) -> str: ...
 
     @overload
@@ -219,6 +222,7 @@ class Agent:
         allowed_skills: Collection[str] | None = ...,
         allowed_tools: Collection[str] | None = ...,
         stream_output: Literal[True] = ...,
+        session_id: str = ...,
     ) -> AsyncStreamEvents: ...
 
     async def _agent_loop(
@@ -230,6 +234,7 @@ class Agent:
         allowed_skills: Collection[str] | None = None,
         allowed_tools: Collection[str] | None = None,
         stream_output: bool = False,
+        session_id: str = "",
     ) -> AsyncStreamEvents | str:
         next_prompt: str | list[dict] = prompt
         display_model = model or self.settings.model
@@ -243,6 +248,7 @@ class Agent:
                 "allowed_tools": list(allowed_tools) if allowed_tools else None,
             },
         )
+        agent_state = _AgentState()
         if stream_output:
             state = StreamState()
             iterator = self._stream_events_with_auto_handoff(
@@ -252,6 +258,8 @@ class Agent:
                 model=model,
                 allowed_skills=allowed_skills,
                 allowed_tools=allowed_tools,
+                session_id=session_id,
+                agent_state=agent_state,
             )
             return AsyncStreamEvents(iterator, state=state)
         else:
@@ -261,6 +269,8 @@ class Agent:
                 model=model,
                 allowed_skills=allowed_skills,
                 allowed_tools=allowed_tools,
+                session_id=session_id,
+                agent_state=agent_state,
             )
 
     async def _run_tools_with_auto_handoff(
@@ -270,6 +280,8 @@ class Agent:
         model: str | None = None,
         allowed_skills: Collection[str] | None = None,
         allowed_tools: Collection[str] | None = None,
+        session_id: str = "",
+        agent_state: _AgentState | None = None,
     ) -> str:
         auto_handoff_remaining = MAX_AUTO_HANDOFF_RETRIES
         display_model = model or self.settings.model
@@ -285,6 +297,8 @@ class Agent:
                     model=model,
                     allowed_skills=allowed_skills,
                     allowed_tools=allowed_tools,
+                    session_id=session_id,
+                    agent_state=agent_state,
                 )
             except Exception as exc:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -383,6 +397,8 @@ class Agent:
         model: str | None = None,
         allowed_skills: Collection[str] | None = None,
         allowed_tools: Collection[str] | None = None,
+        session_id: str = "",
+        agent_state: _AgentState | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         auto_handoff_remaining = MAX_AUTO_HANDOFF_RETRIES
         display_model = model or self.settings.model
@@ -399,6 +415,8 @@ class Agent:
                 allowed_skills=allowed_skills,
                 allowed_tools=allowed_tools,
                 stream_output=True,
+                session_id=session_id,
+                agent_state=agent_state,
             )
             async for event in output:
                 yield event
@@ -512,6 +530,8 @@ class Agent:
         allowed_skills: Collection[str] | None = ...,
         allowed_tools: Collection[str] | None = ...,
         stream_output: Literal[False] = ...,
+        session_id: str = ...,
+        agent_state: _AgentState | None = ...,
     ) -> ToolAutoResult: ...
 
     @overload
@@ -524,6 +544,8 @@ class Agent:
         allowed_skills: Collection[str] | None = ...,
         allowed_tools: Collection[str] | None = ...,
         stream_output: Literal[True] = ...,
+        session_id: str = ...,
+        agent_state: _AgentState | None = ...,
     ) -> AsyncStreamEvents: ...
 
     async def _run_once(
@@ -535,6 +557,8 @@ class Agent:
         allowed_tools: Collection[str] | None = None,
         allowed_skills: Collection[str] | None = None,
         stream_output: bool = False,
+        session_id: str = "",
+        agent_state: _AgentState | None = None,
     ) -> AsyncStreamEvents | ToolAutoResult:
         prompt_text = prompt if isinstance(prompt, str) else _extract_text_from_parts(prompt)
         if allowed_tools is not None:
