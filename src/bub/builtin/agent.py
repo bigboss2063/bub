@@ -48,6 +48,13 @@ _CONTEXT_LENGTH_PATTERNS = re.compile(
 MAX_AUTO_HANDOFF_RETRIES = 1
 
 
+@dataclass
+class _AgentState:
+    """Mutable state shared between agent loop and tool hook wrappers."""
+
+    tools_terminated: bool = False
+
+
 class Agent:
     """Agent that processes prompts using hooks and tools. Backed by republic."""
 
