@@ -121,3 +121,36 @@ class BubHookSpecs:
         Return ``None`` to keep Bub's default concurrent scheduling behavior.
         """
         raise NotImplementedError
+
+    @hookspec
+    def before_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """Inspect or block a tool before execution.
+
+        Return ``{"block": True, "reason": "..."}`` to prevent the tool from running.
+        Return ``None`` to allow the call to proceed.
+        All registered implementations are notified.
+        """
+        raise NotImplementedError
+
+    @hookspec
+    def after_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        session_id: str,
+        is_error: bool,
+    ) -> dict[str, Any] | None:
+        """Inspect or override a tool result after execution.
+
+        Return ``{"content": ..., "is_error": True, "terminate": True}``
+        to override the result, mark it as an error, or terminate the agent loop.
+        Return ``None`` to keep the original result unchanged.
+        All registered implementations are notified.
+        """
+        raise NotImplementedError
