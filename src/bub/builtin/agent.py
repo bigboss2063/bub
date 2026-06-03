@@ -28,6 +28,7 @@ from republic import (
     ToolAutoResult,
     ToolContext,
 )
+from republic.core.errors import ErrorKind
 from republic.tape import InMemoryTapeStore, Tape
 
 from bub.builtin.settings import AgentSettings, load_settings
@@ -605,6 +606,95 @@ class Agent:
         if skills_prompt := self._load_skills_prompt(prompt, workspace, allowed_skills):
             blocks.append(skills_prompt)
         return "\n\n".join(blocks)
+
+    def _wrap_tools_with_hooks(  # noqa: C901
+        self,
+        *,
+        session_id: str,
+        tools: list[Tool],
+        agent_state: _AgentState,
+    ) -> list[Tool]:
+        hook_runtime = self.framework._hook_runtime
+        wrapped: list[Tool] = []
+        for tool in tools:
+            original = tool.handler
+            tool_name = tool.name
+
+            def _make_wrapped(  # noqa: C901
+                orig: Any = original,
+                tname: str = tool_name,
+            ) -> Any:
+                async def wrapped_handler(*args: Any, **kwargs: Any) -> Any:  # noqa: C901
+                    arguments = dict(kwargs)
+                    for i, arg in enumerate(args):
+                        arguments[f"__arg{i}"] = arg
+
+                    # --- before_tool_call hooks ---
+                    try:
+                        before_results = await hook_runtime.call_many(
+                            "before_tool_call",
+                            tool_name=tname,
+                            arguments=arguments,
+                            session_id=session_id,
+                        )
+                    except Exception:
+                        logger.opt(exception=True).warning(
+                            "before_tool_call plugin error for tool={}", tname
+                        )
+                        before_results = []
+
+                    for result in before_results:
+                        if isinstance(result, dict) and result.get("block"):
+                            raise RepublicError(
+                                kind=ErrorKind.TOOL,
+                                message=result.get("reason", "blocked by plugin"),
+                            )
+
+                    # --- original handler ---
+                    is_error = False
+                    result: Any = None
+                    try:
+                        result = await orig(*args, **kwargs)
+                    except Exception:
+                        is_error = True
+
+                    # --- after_tool_call hooks ---
+                    try:
+                        after_results = await hook_runtime.call_many(
+                            "after_tool_call",
+                            tool_name=tname,
+                            arguments=arguments,
+                            result=result,
+                            session_id=session_id,
+                            is_error=is_error,
+                        )
+                    except Exception:
+                        logger.opt(exception=True).warning(
+                            "after_tool_call plugin error for tool={}", tname
+                        )
+                        after_results = []
+
+                    for r in after_results:
+                        if isinstance(r, dict):
+                            if "content" in r:
+                                result = r["content"]
+                                is_error = False
+                            if r.get("is_error"):
+                                is_error = True
+                            if r.get("terminate"):
+                                agent_state.tools_terminated = True
+
+                    if is_error:
+                        err_msg = str(result) if result is not None else "tool execution error"
+                        raise RepublicError(kind=ErrorKind.TOOL, message=err_msg)
+
+                    return result
+
+                return wrapped_handler
+
+            wrapped_tool = replace(tool, handler=_make_wrapped())
+            wrapped.append(wrapped_tool)
+        return wrapped
 
 
 @dataclass(frozen=True)
