@@ -2,7 +2,7 @@ import contextlib
 import hashlib
 import json
 from collections.abc import AsyncGenerator
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -10,6 +10,9 @@ from typing import Any, cast
 from pydantic.dataclasses import dataclass
 from republic import LLM, AsyncTapeStore, Tape, TapeEntry, TapeQuery
 
+from bub import ensure_config
+from bub.builtin.compaction.types import CompactionResult, CompactionSettings
+from bub.builtin.compaction.core import compact as _run_compaction
 from bub.builtin.store import ForkTapeStore
 
 
@@ -109,6 +112,38 @@ class TapeService:
         tape = self._llm.tape(tape_name)
         entries = await tape.handoff_async(name, state=state)
         return cast(list[TapeEntry], entries)
+
+    async def compact(
+        self,
+        tape_name: str,
+        *,
+        reason: str = "manual",
+        instructions: str | None = None,
+    ) -> CompactionResult | None:
+        tape = self._llm.tape(tape_name)
+        entries = list(await tape.query_async.all())
+        settings = ensure_config(CompactionSettings)
+
+        async def write_anchor(name: str, state: dict) -> None:
+            await tape.handoff_async(name, state=state)
+
+        result = await _run_compaction(
+            self._llm,
+            tape_name,
+            entries,
+            settings,
+            reason=reason,
+            instructions=instructions,
+            write_anchor=write_anchor,
+        )
+        if result is not None:
+            tape.context = replace(tape.context, state={
+                **tape.context.state,
+                "compaction_summary": result.summary,
+                "compaction_last_entry_before": result.last_entry_before,
+                "compaction_tokens_before": result.tokens_before,
+            })
+        return result
 
     async def search(self, query: TapeQuery[AsyncTapeStore]) -> list[TapeEntry]:
         return list(await self._store.fetch_all(query))
