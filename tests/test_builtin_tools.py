@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import shlex
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -189,3 +190,21 @@ async def test_quit_tool_terminates_background_shells_for_current_session(tmp_pa
     assert manager.get(other_shell_id).returncode is None
 
     await kill_bash.run(shell_id=other_shell_id)
+
+
+@pytest.mark.asyncio
+async def test_tape_compact_tool(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bub.builtin.compaction.types import CompactionResult
+
+    agent = MagicMock()
+    agent.tapes.compact = AsyncMock(
+        return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=5, tokens_before=1000)
+    )
+    ctx = _tool_context(tmp_path)
+    ctx.state["_runtime_agent"] = agent
+
+    from bub.tools import REGISTRY
+    compact_tool = REGISTRY.get("tape.compact")
+    assert compact_tool is not None
