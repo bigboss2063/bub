@@ -31,6 +31,9 @@ from republic import (
 from republic.core.errors import ErrorKind
 from republic.tape import InMemoryTapeStore, Tape
 
+from bub import ensure_config
+from bub.builtin.compaction.core import should_compact
+from bub.builtin.compaction.types import CompactionSettings
 from bub.builtin.settings import AgentSettings, load_settings
 from bub.builtin.store import ForkTapeStore
 from bub.builtin.tape import TapeService
@@ -362,31 +365,35 @@ class Agent:
                 )
                 continue
 
-            # Check if this is a context-length error that can be recovered via auto-handoff
+            # Check for proactive threshold compaction
+            compaction_settings = ensure_config(CompactionSettings)
+            if compaction_settings.enabled:
+                usage = getattr(output, "usage", None)
+                total_tokens = getattr(usage, "total_tokens", None) if usage else None
+                if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
+                    logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
+                    await self.tapes.compact(tape.name, reason="threshold")
+
+            # Check if this is a context-length error that can be recovered via compaction
             if auto_handoff_remaining > 0 and _is_context_length_error(outcome.error):
                 auto_handoff_remaining -= 1
                 logger.warning(
-                    "auto_handoff: context length exceeded, performing automatic handoff. tape={} step={}",
+                    "compaction: context overflow, triggering compaction. tape={} step={}",
                     tape.name,
                     step,
                 )
-                await self.tapes.handoff(
-                    tape.name,
-                    name="auto_handoff/context_overflow",
-                    state={"reason": "context_length_exceeded", "error": outcome.error},
-                )
+                await self.tapes.compact(tape.name, reason="overflow")
                 await self.tapes.append_event(
                     tape.name,
                     "loop.step",
                     {
                         "step": step,
                         "elapsed_ms": elapsed_ms,
-                        "status": "auto_handoff",
+                        "status": "compaction_overflow",
                         "error": outcome.error,
                         "date": datetime.now(UTC).isoformat(),
                     },
                 )
-                # Retry with original prompt — the handoff anchor will truncate history
                 next_prompt = prompt
                 continue
 
@@ -488,31 +495,35 @@ class Agent:
                 )
                 continue
 
-            # Check if this is a context-length error that can be recovered via auto-handoff
+            # Check for proactive threshold compaction
+            compaction_settings = ensure_config(CompactionSettings)
+            if compaction_settings.enabled:
+                usage = state.usage
+                total_tokens = getattr(usage, "total_tokens", None) if usage else None
+                if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
+                    logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
+                    await self.tapes.compact(tape.name, reason="threshold")
+
+            # Check if this is a context-length error that can be recovered via compaction
             if auto_handoff_remaining > 0 and _is_context_length_error(outcome.error):
                 auto_handoff_remaining -= 1
                 logger.warning(
-                    "auto_handoff: context length exceeded, performing automatic handoff. tape={} step={}",
+                    "compaction: context overflow, triggering compaction. tape={} step={}",
                     tape.name,
                     step,
                 )
-                await self.tapes.handoff(
-                    tape.name,
-                    name="auto_handoff/context_overflow",
-                    state={"reason": "context_length_exceeded", "error": outcome.error},
-                )
+                await self.tapes.compact(tape.name, reason="overflow")
                 await self.tapes.append_event(
                     tape.name,
                     "loop.step",
                     {
                         "step": step,
                         "elapsed_ms": elapsed_ms,
-                        "status": "auto_handoff",
+                        "status": "compaction_overflow",
                         "error": outcome.error,
                         "date": datetime.now(UTC).isoformat(),
                     },
                 )
-                # Retry with original prompt — the handoff anchor will truncate history
                 next_prompt = prompt
                 continue
 
