@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 from republic import TapeEntry
 
 from bub.builtin.compaction.core import find_cut_point

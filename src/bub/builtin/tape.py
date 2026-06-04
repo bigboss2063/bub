@@ -11,8 +11,8 @@ from pydantic.dataclasses import dataclass
 from republic import LLM, AsyncTapeStore, Tape, TapeEntry, TapeQuery
 
 from bub import ensure_config
-from bub.builtin.compaction.types import CompactionResult, CompactionSettings
 from bub.builtin.compaction.core import compact as _run_compaction
+from bub.builtin.compaction.types import CompactionResult, CompactionSettings
 from bub.builtin.store import ForkTapeStore
 
 

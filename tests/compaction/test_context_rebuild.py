@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import pytest
-from republic import TapeContext, TapeEntry
+from republic import TapeEntry
 
 from bub.builtin.context import _select_messages, default_tape_context
 

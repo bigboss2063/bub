@@ -206,13 +206,14 @@ async def generate_summary(
 
     try:
         async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
-            return await llm.chat_async(
+            result = await llm.chat_async(
                 prompt=prompt,
                 system_prompt=SUMMARIZATION_SYSTEM_PROMPT,
                 tape=None,
                 max_tokens=4096,
             )
-    except (TimeoutError, asyncio.TimeoutError):
+        return str(result)
+    except TimeoutError:
         return "Compaction failed: summary generation timed out after 120s"
     except Exception as exc:
         logger.warning("summary generation failed: {}", exc)
@@ -228,13 +229,14 @@ async def generate_turn_prefix_summary(
 
     try:
         async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
-            return await llm.chat_async(
+            result = await llm.chat_async(
                 prompt=prompt,
                 system_prompt=SUMMARIZATION_SYSTEM_PROMPT,
                 tape=None,
                 max_tokens=4096,
             )
-    except (TimeoutError, asyncio.TimeoutError):
+        return str(result)
+    except TimeoutError:
         return "Turn prefix summary timed out after 120s"
     except Exception as exc:
         logger.warning("turn prefix summary generation failed: {}", exc)
@@ -254,16 +256,7 @@ def _render_file_operations(file_ops: FileOperations) -> str:
     return "\n".join(parts) if parts else ""
 
 
-async def compact(
-    llm: LLM,
-    tape_name: str,
-    entries: list[TapeEntry],
-    settings: CompactionSettings,
-    *,
-    reason: str = "manual",
-    instructions: str | None = None,
-    write_anchor: Any = None,
-) -> CompactionResult | None:
+def _find_previous_compaction_boundary(entries: list[TapeEntry]) -> tuple[str | None, int]:
     previous_summary: str | None = None
     boundary_start = 0
     for entry in reversed(entries):
@@ -280,6 +273,39 @@ async def compact(
                     else:
                         boundary_start = len(entries)
             break
+    return previous_summary, boundary_start
+
+
+async def _generate_summary_for_cut(
+    llm: LLM,
+    entries: list[TapeEntry],
+    boundary_start: int,
+    cut: CutPointResult,
+    file_ops: FileOperations,
+    previous_summary: str | None,
+    instructions: str | None,
+) -> str:
+    if cut.is_split_turn and cut.turn_start_index is not None:
+        history_entries = entries[boundary_start:cut.turn_start_index]
+        prefix_entries = entries[cut.turn_start_index:cut.cut_index]
+        history_task = generate_summary(llm, history_entries, file_ops, previous_summary, instructions)
+        prefix_task = generate_turn_prefix_summary(llm, prefix_entries)
+        history_result, prefix_result = await asyncio.gather(history_task, prefix_task)
+        return f"{history_result}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_result}"
+    return await generate_summary(llm, entries, file_ops, previous_summary, instructions)
+
+
+async def compact(
+    llm: LLM,
+    tape_name: str,
+    entries: list[TapeEntry],
+    settings: CompactionSettings,
+    *,
+    reason: str = "manual",
+    instructions: str | None = None,
+    write_anchor: Any = None,
+) -> CompactionResult | None:
+    previous_summary, boundary_start = _find_previous_compaction_boundary(entries)
 
     cut = find_cut_point(entries, boundary_start, settings.keep_recent_tokens)
     if cut.cut_index == 0:
@@ -290,16 +316,9 @@ async def compact(
         return None
 
     file_ops = extract_file_operations(to_summarize)
-
-    if cut.is_split_turn and cut.turn_start_index is not None:
-        history_entries = entries[boundary_start:cut.turn_start_index]
-        prefix_entries = entries[cut.turn_start_index:cut.cut_index]
-        history_task = generate_summary(llm, history_entries, file_ops, previous_summary, instructions)
-        prefix_task = generate_turn_prefix_summary(llm, prefix_entries)
-        history_result, prefix_result = await asyncio.gather(history_task, prefix_task)
-        summary = f"{history_result}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_result}"
-    else:
-        summary = await generate_summary(llm, to_summarize, file_ops, previous_summary, instructions)
+    summary = await _generate_summary_for_cut(
+        llm, to_summarize, boundary_start, cut, file_ops, previous_summary, instructions
+    )
 
     last_entry_before = entries[cut.cut_index - 1].id
     tokens_before = sum(

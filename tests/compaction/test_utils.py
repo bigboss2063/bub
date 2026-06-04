@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from bub.builtin.compaction.utils import (
     estimate_tokens,
     extract_file_operations,

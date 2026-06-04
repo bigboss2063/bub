@@ -26,36 +26,46 @@ def truncate_tool_result(content: str) -> str:
     return content[:TOOL_RESULT_TRUNCATE_AT] + "... (truncated)"
 
 
+def _serialize_message_entry(entry: TapeEntry, lines: list[str]) -> None:
+    payload = entry.payload
+    role = payload.get("role", "")
+    content = payload.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+    if role == "user":
+        lines.append(f"[User]: {content}")
+    elif role == "assistant":
+        lines.append(f"[Assistant]: {content}")
+
+
+def _serialize_tool_call_entry(entry: TapeEntry, lines: list[str]) -> None:
+    calls = entry.payload.get("calls", [])
+    call_descs: list[str] = []
+    for call in calls:
+        func = call.get("function", {})
+        name = func.get("name", "unknown")
+        call_descs.append(name)
+    if call_descs:
+        lines.append(f"[Assistant tool calls]: {'; '.join(call_descs)}")
+
+
+def _serialize_tool_result_entry(entry: TapeEntry, lines: list[str]) -> None:
+    results = entry.payload.get("results", [])
+    for result in results:
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        lines.append(f"[Tool result]: {truncate_tool_result(text)}")
+
+
 def serialize_messages(entries: Iterable[TapeEntry]) -> str:
     lines: list[str] = []
     for entry in entries:
         match entry.kind:
             case "message":
-                payload = entry.payload
-                role = payload.get("role", "")
-                content = payload.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        part.get("text", "") for part in content if isinstance(part, dict)
-                    )
-                if role == "user":
-                    lines.append(f"[User]: {content}")
-                elif role == "assistant":
-                    lines.append(f"[Assistant]: {content}")
+                _serialize_message_entry(entry, lines)
             case "tool_call":
-                calls = entry.payload.get("calls", [])
-                call_descs: list[str] = []
-                for call in calls:
-                    func = call.get("function", {})
-                    name = func.get("name", "unknown")
-                    call_descs.append(name)
-                if call_descs:
-                    lines.append(f"[Assistant tool calls]: {'; '.join(call_descs)}")
+                _serialize_tool_call_entry(entry, lines)
             case "tool_result":
-                results = entry.payload.get("results", [])
-                for result in results:
-                    text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                    lines.append(f"[Tool result]: {truncate_tool_result(text)}")
+                _serialize_tool_result_entry(entry, lines)
     return "\n".join(lines)
 
 

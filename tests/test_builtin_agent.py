@@ -247,8 +247,8 @@ async def test_agent_run_rejects_unknown_allowed_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_loop_triggers_compaction_on_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dataclasses import replace
     from unittest.mock import AsyncMock
+
     from bub.builtin.compaction.types import CompactionResult
 
     agent = _make_agent()
