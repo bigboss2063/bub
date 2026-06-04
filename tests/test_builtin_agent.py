@@ -240,3 +240,43 @@ async def test_agent_run_rejects_unknown_allowed_tools() -> None:
 
     with pytest.raises(ValueError, match="tests_missing_agent_tool"):
         [event async for event in stream]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_triggers_compaction_on_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+    from bub.builtin.compaction.types import CompactionResult
+
+    agent = _make_agent()
+    agent.settings = AgentSettings.model_construct(
+        model="test:model", api_key="k", api_base="b", max_steps=5, max_tokens=4096,
+    )
+
+    fake_tape_service = MagicMock()
+    fake_tape_service.compact = AsyncMock(
+        return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=10, tokens_before=5000)
+    )
+    fake_tape_service.append_event = AsyncMock()
+    agent.tapes = fake_tape_service
+
+    tape = MagicMock()
+    tape.name = "test_tape"
+    tape.context = TapeContext(state={})
+
+    from republic import ToolAutoResult
+    step_count = 0
+
+    async def fake_run_once(**kwargs: Any) -> ToolAutoResult:
+        nonlocal step_count
+        step_count += 1
+        if step_count == 1:
+            return ToolAutoResult(kind="text", text="done", tool_calls=[], tool_results=[], error=None)
+        return ToolAutoResult(kind="text", text="done", tool_calls=[], tool_results=[], error=None)
+
+    agent._run_once = fake_run_once  # type: ignore[assignment]
+
+    monkeypatch.setattr(agent_module, "_resolve_tool_auto_result", lambda output: agent_module._ToolAutoOutcome(kind="text", text="done"))
+
+    result = await agent._run_tools_with_auto_handoff(tape=tape, prompt="hello")
+    assert result == "done"
