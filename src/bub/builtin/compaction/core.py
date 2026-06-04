@@ -216,7 +216,7 @@ async def generate_summary(
     except TimeoutError:
         return "Compaction failed: summary generation timed out after 120s"
     except Exception as exc:
-        logger.warning("summary generation failed: {}", exc)
+        logger.warning("summary generation failed: %s", exc)
         return f"Compaction failed: {exc}"
 
 
@@ -239,7 +239,7 @@ async def generate_turn_prefix_summary(
     except TimeoutError:
         return "Turn prefix summary timed out after 120s"
     except Exception as exc:
-        logger.warning("turn prefix summary generation failed: {}", exc)
+        logger.warning("turn prefix summary generation failed: %s", exc)
         return f"Turn prefix summary failed: {exc}"
 
 

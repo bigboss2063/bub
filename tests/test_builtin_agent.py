@@ -246,7 +246,7 @@ async def test_agent_run_rejects_unknown_allowed_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_triggers_compaction_on_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_loop_triggers_compaction_on_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import AsyncMock
 
     from bub.builtin.compaction.types import CompactionResult
@@ -268,18 +268,30 @@ async def test_agent_loop_triggers_compaction_on_threshold(monkeypatch: pytest.M
     tape.context = TapeContext(state={})
 
     from republic import ToolAutoResult
+
     step_count = 0
 
     async def fake_run_once(**kwargs: Any) -> ToolAutoResult:
         nonlocal step_count
         step_count += 1
-        if step_count == 1:
-            return ToolAutoResult(kind="text", text="done", tool_calls=[], tool_results=[], error=None)
         return ToolAutoResult(kind="text", text="done", tool_calls=[], tool_results=[], error=None)
 
     agent._run_once = fake_run_once  # type: ignore[assignment]
 
-    monkeypatch.setattr(agent_module, "_resolve_tool_auto_result", lambda output: agent_module._ToolAutoOutcome(kind="text", text="done"))
+    resolve_call_count = 0
+
+    def resolve_side_effect(output: Any) -> agent_module._ToolAutoOutcome:
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        if resolve_call_count == 1:
+            return agent_module._ToolAutoOutcome(
+                kind="error",
+                error="context_length_exceeded: maximum context window exceeded",
+            )
+        return agent_module._ToolAutoOutcome(kind="text", text="done")
+
+    monkeypatch.setattr(agent_module, "_resolve_tool_auto_result", resolve_side_effect)
 
     result = await agent._run_tools_with_auto_handoff(tape=tape, prompt="hello")
     assert result == "done"
+    fake_tape_service.compact.assert_awaited_once_with("test_tape", reason="overflow")
