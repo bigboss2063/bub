@@ -108,9 +108,13 @@ class ForkTapeStore:
             yield
         finally:
             was_reset = current_tape_was_reset.get()
-            current_store.reset(token)
-            current_fork_tape.reset(tape_token)
-            current_tape_was_reset.reset(reset_token)
+            for var, tok in (
+                (current_store, token),
+                (current_fork_tape, tape_token),
+                (current_tape_was_reset, reset_token),
+            ):
+                with contextlib.suppress(ValueError):
+                    var.reset(tok)
             if merge_back:
                 if was_reset:
                     await self._parent.reset(tape)
