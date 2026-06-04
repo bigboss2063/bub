@@ -257,7 +257,7 @@ async def test_agent_loop_triggers_compaction_on_overflow(monkeypatch: pytest.Mo
     )
 
     fake_tape_service = MagicMock()
-    fake_tape_service.compact = AsyncMock(
+    fake_tape_service.handoff = AsyncMock(
         return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=10, tokens_before=5000)
     )
     fake_tape_service.append_event = AsyncMock()
@@ -294,4 +294,4 @@ async def test_agent_loop_triggers_compaction_on_overflow(monkeypatch: pytest.Mo
 
     result = await agent._run_tools_with_auto_handoff(tape=tape, prompt="hello")
     assert result == "done"
-    fake_tape_service.compact.assert_awaited_once_with("test_tape", reason="overflow")
+    fake_tape_service.handoff.assert_awaited_once_with("test_tape", reason="overflow")

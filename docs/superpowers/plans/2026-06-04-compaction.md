@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the reactive-only `auto_handoff` mechanism with a proactive compaction pipeline that summarizes truncated history and injects it back into context.
+**Goal:** Replace the reactive-only `auto_handoff` mechanism with a proactive handoff (compaction) pipeline that summarizes truncated history and injects it back into context. The public API is unified under "handoff"; "compaction" is the name of the internal algorithm module.
 
 **Architecture:** A new `src/bub/builtin/compaction/` module handles cut-point selection, summary generation (via off-tape LLM calls), and anchor writing. The agent loop triggers compaction proactively (threshold) or reactively (overflow). The context selector (`context.py`) is enhanced to detect compaction metadata in `TapeContext.state` and render the summary as a user message before the kept entries.
 
@@ -18,11 +18,11 @@
 | Create | `src/bub/builtin/compaction/types.py` | `CompactionSettings`, `CompactionResult`, `CutPointResult`, `FileOperations` |
 | Create | `src/bub/builtin/compaction/utils.py` | Token estimation, message serialization, file operation extraction |
 | Create | `src/bub/builtin/compaction/core.py` | `should_compact()`, `find_cut_point()`, `generate_summary()`, `generate_turn_prefix_summary()`, `compact()` |
-| Modify | `src/bub/builtin/tape.py:36-130` | Add `TapeService.compact()` method |
+| Modify | `src/bub/builtin/tape.py:36-130` | Add `TapeService.handoff()` method (replaces old compact + handoff) |
 | Modify | `src/bub/builtin/context.py:18-33` | Detect compaction state, render summary, filter entries |
 | Modify | `src/bub/builtin/agent.py:259-369` | Replace auto_handoff with compaction in non-streaming loop |
 | Modify | `src/bub/builtin/agent.py:371-487` | Replace auto_handoff with compaction in streaming loop |
-| Modify | `src/bub/builtin/tools.py:227-232` | Add `tape.compact` tool, deprecate `tape.handoff` |
+| Modify | `src/bub/builtin/tools.py:227-232` | `tape.handoff` tool triggers compaction via handoff API |
 | Create | `tests/compaction/__init__.py` | Test package marker |
 | Create | `tests/compaction/test_types.py` | Settings and type tests |
 | Create | `tests/compaction/test_utils.py` | Token estimation, serialization, file ops tests |
@@ -1041,13 +1041,13 @@ git commit -m "test(compaction): add summary generation and compact orchestratio
 
 ---
 
-### Task 5: TapeService.compact() Method
+### Task 5: TapeService.handoff() Method
 
 **Files:**
 - Modify: `src/bub/builtin/tape.py:1-130`
 - Test: (covered by existing `test_core.py` integration)
 
-- [ ] **Step 1: Add CompactionResult import and compact method to TapeService**
+- [ ] **Step 1: Add CompactionResult import and handoff method to TapeService**
 
 In `src/bub/builtin/tape.py`, add the import at the top:
 ```python
@@ -1058,9 +1058,9 @@ from bub.builtin.compaction.types import CompactionResult, CompactionSettings
 from bub.builtin.compaction.core import compact as _run_compaction
 ```
 
-Add the `compact` method to `TapeService` (after the `handoff` method, around line 111):
+Add the `handoff` method to `TapeService`:
 ```python
-    async def compact(
+    async def handoff(
         self,
         tape_name: str,
         *,
@@ -1102,7 +1102,7 @@ Expected: All existing tests still PASS
 
 ```bash
 git add src/bub/builtin/tape.py
-git commit -m "feat(compaction): add TapeService.compact() method"
+git commit -m "feat(compaction): add TapeService.handoff() method"
 ```
 
 ---
@@ -1317,7 +1317,7 @@ async def test_agent_loop_triggers_compaction_on_threshold(monkeypatch: pytest.M
     )
 
     fake_tape_service = MagicMock()
-    fake_tape_service.compact = AsyncMock(
+    fake_tape_service.handoff = AsyncMock(
         return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=10, tokens_before=5000)
     )
     fake_tape_service.append_event = AsyncMock()
@@ -1363,7 +1363,7 @@ Replace the overflow handling block in `_run_tools_with_auto_handoff` (lines 328
                     tape.name,
                     step,
                 )
-                await self.tapes.compact(tape.name, reason="overflow")
+                await self.tapes.handoff(tape.name, reason="overflow")
                 await self.tapes.append_event(
                     tape.name,
                     "loop.step",
@@ -1388,7 +1388,7 @@ After the `outcome.kind == "continue"` block (around line 326, before the overfl
                 total_tokens = getattr(usage, "total_tokens", None) if usage else None
                 if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
                     logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
-                    await self.tapes.compact(tape.name, reason="threshold")
+                    await self.tapes.handoff(tape.name, reason="threshold")
 ```
 
 - [ ] **Step 3: Apply the same changes to the streaming loop**
@@ -1404,7 +1404,7 @@ Replace the overflow block (lines 446-472) with:
                     tape.name,
                     step,
                 )
-                await self.tapes.compact(tape.name, reason="overflow")
+                await self.tapes.handoff(tape.name, reason="overflow")
                 await self.tapes.append_event(
                     tape.name,
                     "loop.step",
@@ -1429,7 +1429,7 @@ After the streaming `outcome.kind == "continue"` block (around line 444), add th
                 total_tokens = getattr(usage, "total_tokens", None) if usage else None
                 if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
                     logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
-                    await self.tapes.compact(tape.name, reason="threshold")
+                    await self.tapes.handoff(tape.name, reason="threshold")
 ```
 
 - [ ] **Step 4: Run tests to verify**
@@ -1446,54 +1446,44 @@ git commit -m "feat(compaction): integrate threshold and overflow compaction int
 
 ---
 
-### Task 8: Tool Replacement (tape.compact)
+### Task 8: Tool (tape.handoff)
 
 **Files:**
 - Modify: `src/bub/builtin/tools.py:227-232`
 
-- [ ] **Step 1: Write failing test for tape.compact tool**
+- [ ] **Step 1: Write failing test for tape.handoff tool**
 
 In `tests/test_builtin_tools.py`, add a test:
 ```python
 @pytest.mark.asyncio
-async def test_tape_compact_tool(tmp_path: Path) -> None:
+async def test_tape_handoff_tool(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
     from bub.builtin.compaction.types import CompactionResult
 
     agent = MagicMock()
-    agent.tapes.compact = AsyncMock(
+    agent.tapes.handoff = AsyncMock(
         return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=5, tokens_before=1000)
     )
     ctx = _tool_context(tmp_path)
     ctx.state["_runtime_agent"] = agent
 
-    from bub.builtin.tools import REGISTRY
-    compact_tool = REGISTRY.get("tape.compact")
-    assert compact_tool is not None
+    from bub.tools import REGISTRY
+    handoff_tool = REGISTRY.get("tape.handoff")
+    assert handoff_tool is not None
 ```
 
-- [ ] **Step 2: Add tape.compact tool and deprecate tape.handoff**
+- [ ] **Step 2: Update tape.handoff tool to trigger compaction via handoff API**
 
-In `src/bub/builtin/tools.py`, after the `tape_handoff` function (line 232), add:
-```python
-@tool(context=True, name="tape.compact")
-async def tape_compact(instructions: str = "", *, context: ToolContext) -> str:
-    """Run compaction on the current tape to summarize history and free context space."""
-    agent = _get_agent(context)
-    result = await agent.tapes.compact(context.tape or "", reason="manual", instructions=instructions or None)
-    if result is None:
-        return "compaction skipped: nothing to compact"
-    return f"compaction complete: {result.tokens_before} tokens summarized"
-```
-
-Update the `tape_handoff` docstring to mark it deprecated:
+In `src/bub/builtin/tools.py`, replace the old `tape_handoff` function:
 ```python
 @tool(context=True, name="tape.handoff")
-async def tape_handoff(name: str = "handoff", summary: str = "", *, context: ToolContext) -> str:
-    """DEPRECATED: Use tape.compact instead. Add a handoff anchor to the current tape."""
+async def tape_handoff(instructions: str = "", *, context: ToolContext) -> str:
+    """Run handoff on the current tape to summarize history and free context space."""
     agent = _get_agent(context)
-    await agent.tapes.handoff(context.tape or "", name=name, state={"summary": summary})
-    return f"anchor added: {name}"
+    result = await agent.tapes.handoff(context.tape or "", reason="manual", instructions=instructions or None)
+    if result is None:
+        return "handoff skipped: nothing to compact"
+    return f"handoff complete: {result.tokens_before} tokens summarized"
 ```
 
 - [ ] **Step 3: Run tests to verify**
@@ -1516,7 +1506,7 @@ Expected: No errors
 
 ```bash
 git add src/bub/builtin/tools.py tests/test_builtin_tools.py
-git commit -m "feat(compaction): add tape.compact tool, deprecate tape.handoff"
+git commit -m "feat(compaction): update tape.handoff tool to use handoff API"
 ```
 
 ---

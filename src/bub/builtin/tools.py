@@ -225,21 +225,13 @@ async def tape_reset(archive: bool = False, *, context: ToolContext) -> str:
 
 
 @tool(context=True, name="tape.handoff")
-async def tape_handoff(name: str = "handoff", summary: str = "", *, context: ToolContext) -> str:
-    """DEPRECATED: Use tape.compact instead. Add a handoff anchor to the current tape."""
+async def tape_handoff(instructions: str = "", *, context: ToolContext) -> str:
+    """Run handoff on the current tape to summarize history and free context space."""
     agent = _get_agent(context)
-    await agent.tapes.handoff(context.tape or "", name=name, state={"summary": summary})
-    return f"anchor added: {name}"
-
-
-@tool(context=True, name="tape.compact")
-async def tape_compact(instructions: str = "", *, context: ToolContext) -> str:
-    """Run compaction on the current tape to summarize history and free context space."""
-    agent = _get_agent(context)
-    result = await agent.tapes.compact(context.tape or "", reason="manual", instructions=instructions or None)
+    result = await agent.tapes.handoff(context.tape or "", reason="manual", instructions=instructions or None)
     if result is None:
-        return "compaction skipped: nothing to compact"
-    return f"compaction complete: {result.tokens_before} tokens summarized"
+        return "handoff skipped: nothing to compact"
+    return f"handoff complete: {result.tokens_before} tokens summarized"
 
 
 @tool(context=True, name="tape.anchors")
@@ -307,7 +299,7 @@ def show_help() -> str:
         "  ,skill name=foo\n"
         "  ,tape.info\n"
         "  ,tape.search query=error\n"
-        "  ,tape.handoff name=phase-1 summary='done'\n"
+        "  ,tape.handoff instructions='focus on errors'\n"
         "  ,tape.anchors\n"
         "  ,fs.read path=README.md\n"
         "  ,fs.write path=tmp.txt content='hello'\n"

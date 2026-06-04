@@ -15,7 +15,7 @@ Pi 已经实现了完整的 compaction 管线。本设计复用 bub 现有的 ap
 - 被截断的历史以结构化摘要的形式重新进入上下文
 - 保留近期消息的原文（raw tail），避免过度摘要导致的细节丢失
 - 支持增量更新（`previousSummary`）
-- 不保留任何旧 handoff 语义
+- 公共 API 统一为 handoff（compaction 是 handoff 的内部算法实现）
 
 ## 非目标
 
@@ -408,8 +408,8 @@ path/to/changed.ts
 
 ```
 1. Agent loop 检测到触发条件（threshold/overflow/manual）
-2. 调用 tape_service.compact(tape_name, reason=reason)
-3. compact() 内部：
+2. 调用 tape_service.handoff(tape_name, reason=reason)
+3. handoff() 内部调用 compaction 模块：
    a. 查询 tape 上所有条目（tape.query_async.all()）
    b. 查找最新 compaction anchor（如果有）
       - 读取其 state.summary 作为 previousSummary
@@ -433,7 +433,7 @@ path/to/changed.ts
           "details": {"read_files": ..., "modified_files": ...},
           "trigger": reason,
       })
-4. compact() 返回 CompactionResult(summary, last_entry_before, tokens_before)
+4. handoff() 返回 CompactionResult(summary, last_entry_before, tokens_before)
 5. Agent loop 更新 tape context：
    tape.context = replace(tape.context, state={
        **tape.context.state,
@@ -455,9 +455,9 @@ async def _run_tools(self, tape, prompt, ...):
     for step in range(1, self.settings.max_steps + 1):
         # ... 调用模型 ...
 
-        # 检查是否需要 compaction
+        # 检查是否需要 handoff
         if usage and should_compact(usage.total_tokens, context_window, settings):
-            result = await self.tapes.compact(tape.name, reason="threshold")
+            result = await self.tapes.handoff(tape.name, reason="threshold")
             tape.context = replace(tape.context, state={
                 **tape.context.state,
                 "compaction_summary": result.summary,
@@ -473,8 +473,8 @@ async def _run_tools(self, tape, prompt, ...):
 ```python
 if is_context_overflow(error):
     # 移除错误消息
-    # 触发 compaction
-    result = await self.tapes.compact(tape.name, reason="overflow")
+    # 触发 handoff
+    result = await self.tapes.handoff(tape.name, reason="overflow")
     tape.context = replace(tape.context, state={
         **tape.context.state,
         "compaction_summary": result.summary,
@@ -500,14 +500,14 @@ class CompactionResult:
     tokens_before: int
 
 class TapeService:
-    async def compact(
+    async def handoff(
         self,
         tape_name: str,
         *,
         reason: str = "manual",
         instructions: str | None = None,
     ) -> CompactionResult:
-        """Run compaction on a tape.
+        """Run handoff (compaction) on a tape.
 
         1. Reads all tape entries
         2. Finds cut point and generates summary (off-tape LLM call)
@@ -517,18 +517,11 @@ class TapeService:
         The caller (agent loop) is responsible for updating tape.context
         with the returned compaction metadata.
         """
-
-    async def handoff(self, tape_name: str, *, name: str, state: dict | None = None) -> list[TapeEntry]:
-        """DEPRECATED: Use compact() instead.
-
-        For non-compaction anchors, still writes a plain anchor.
-        """
 ```
 
-### 工具替换
+### 工具
 
-- `tape.handoff` → `tape.compact`
-- `tape.info` 返回的信息更新：显示 compaction 统计
+- `tape.handoff` — 触发 handoff/compaction，可附加 `instructions` 参数
 
 ---
 
@@ -579,8 +572,8 @@ src/bub/builtin/
 │   └── types.py          # CompactionSettings, CompactionResult, CutPointResult, FileOperations
 ├── agent.py              # 修改：集成 compaction 触发，更新 tape.context
 ├── context.py            # 修改：selector 识别 compaction state，渲染 summary
-├── tape.py               # 修改：TapeService.compact() 返回 CompactionResult
-└── tools.py              # 修改：tape.compact 替换 tape.handoff
+├── tape.py               # 修改：TapeService.handoff() 返回 CompactionResult
+└── tools.py              # 修改：tape.handoff 工具触发 compaction
 ```
 
 ---
@@ -633,9 +626,16 @@ src/bub/builtin/
 
 ---
 
+## 命名约定
+
+- **handoff** — 公共操作名称（API、工具名、日志）。含义：往 tape 写入 anchor，重启上下文
+- **compaction** — 内部算法名称（模块、类型、anchor name）。含义：摘要 + 截断的实现细节
+
+这避免了"代码里到处是 handoff 但设计说 handoff 被废弃了"的矛盾。
+
 ## 迁移说明
 
 - 旧 tape 中的 `auto_handoff/*` anchor 不再具有截断语义，当作普通消息渲染
 - 旧 tape 中的非标准 anchor（如 `phase-1`）当作普通消息渲染
-- `tape.handoff` 工具标记为 deprecated，替换为 `tape.compact`
+- `tape.handoff` 工具升级为带摘要的 handoff（内部使用 compaction 算法）
 - 不需要自动迁移旧 tape

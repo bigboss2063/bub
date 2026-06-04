@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from pydantic.dataclasses import dataclass
 from republic import LLM, AsyncTapeStore, Tape, TapeEntry, TapeQuery
@@ -108,12 +108,7 @@ class TapeService:
         await tape.handoff_async("session/start", state=state)
         return f"Archived: {archive_path}" if archive_path else "ok"
 
-    async def handoff(self, tape_name: str, *, name: str, state: dict[str, Any] | None = None) -> list[TapeEntry]:
-        tape = self._llm.tape(tape_name)
-        entries = await tape.handoff_async(name, state=state)
-        return cast(list[TapeEntry], entries)
-
-    async def compact(
+    async def handoff(
         self,
         tape_name: str,
         *,
