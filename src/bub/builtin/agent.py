@@ -49,6 +49,7 @@ _CONTEXT_LENGTH_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 MAX_AUTO_HANDOFF_RETRIES = 1
+COMPACT_COOLDOWN_STEPS = 2
 
 
 class Agent:
@@ -268,6 +269,7 @@ class Agent:
         allowed_tools: Collection[str] | None = None,
     ) -> str:
         auto_handoff_remaining = MAX_AUTO_HANDOFF_RETRIES
+        compact_cooldown = 0
         display_model = model or self.settings.model
         next_prompt = prompt
         for step in range(1, self.settings.max_steps + 1):
@@ -328,35 +330,15 @@ class Agent:
                 )
                 continue
 
-            # Check for proactive threshold compaction
-            compaction_settings = ensure_config(CompactionSettings)
-            if compaction_settings.enabled:
-                usage = getattr(output, "usage", None)
-                total_tokens = getattr(usage, "total_tokens", None) if usage else None
-                if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
-                    logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
-                    await self.tapes.compact(tape.name, reason="threshold")
-
-            # Check if this is a context-length error that can be recovered via compaction
-            if auto_handoff_remaining > 0 and _is_context_length_error(outcome.error):
+            usage = getattr(output, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", None) if usage else None
+            should_retry, compact_cooldown = await self._run_compaction_checks(
+                tape, step, elapsed_ms, total_tokens, outcome.error,
+                can_overflow_compact=auto_handoff_remaining > 0,
+                compact_cooldown=compact_cooldown,
+            )
+            if should_retry:
                 auto_handoff_remaining -= 1
-                logger.warning(
-                    "compaction: context overflow, triggering compaction. tape={} step={}",
-                    tape.name,
-                    step,
-                )
-                await self.tapes.compact(tape.name, reason="overflow")
-                await self.tapes.append_event(
-                    tape.name,
-                    "loop.step",
-                    {
-                        "step": step,
-                        "elapsed_ms": elapsed_ms,
-                        "status": "compaction_overflow",
-                        "error": outcome.error,
-                        "date": datetime.now(UTC).isoformat(),
-                    },
-                )
                 next_prompt = prompt
                 continue
 
@@ -385,6 +367,7 @@ class Agent:
         allowed_tools: Collection[str] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         auto_handoff_remaining = MAX_AUTO_HANDOFF_RETRIES
+        compact_cooldown = 0
         display_model = model or self.settings.model
         next_prompt = prompt
         for step in range(1, self.settings.max_steps + 1):
@@ -450,35 +433,14 @@ class Agent:
                 )
                 continue
 
-            # Check for proactive threshold compaction
-            compaction_settings = ensure_config(CompactionSettings)
-            if compaction_settings.enabled:
-                usage = state.usage
-                total_tokens = getattr(usage, "total_tokens", None) if usage else None
-                if total_tokens and should_compact(total_tokens, compaction_settings.context_window, compaction_settings):
-                    logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
-                    await self.tapes.compact(tape.name, reason="threshold")
-
-            # Check if this is a context-length error that can be recovered via compaction
-            if auto_handoff_remaining > 0 and _is_context_length_error(outcome.error):
+            total_tokens = getattr(state.usage, "total_tokens", None) if state.usage else None
+            should_retry, compact_cooldown = await self._run_compaction_checks(
+                tape, step, elapsed_ms, total_tokens, outcome.error,
+                can_overflow_compact=auto_handoff_remaining > 0,
+                compact_cooldown=compact_cooldown,
+            )
+            if should_retry:
                 auto_handoff_remaining -= 1
-                logger.warning(
-                    "compaction: context overflow, triggering compaction. tape={} step={}",
-                    tape.name,
-                    step,
-                )
-                await self.tapes.compact(tape.name, reason="overflow")
-                await self.tapes.append_event(
-                    tape.name,
-                    "loop.step",
-                    {
-                        "step": step,
-                        "elapsed_ms": elapsed_ms,
-                        "status": "compaction_overflow",
-                        "error": outcome.error,
-                        "date": datetime.now(UTC).isoformat(),
-                    },
-                )
                 next_prompt = prompt
                 continue
 
@@ -496,6 +458,41 @@ class Agent:
             raise RuntimeError(outcome.error)
 
         raise RuntimeError(f"max_steps_reached={self.settings.max_steps}")
+
+    async def _run_compaction_checks(
+        self,
+        tape: Tape,
+        step: int,
+        elapsed_ms: int,
+        total_tokens: int | None,
+        error: str,
+        can_overflow_compact: bool,
+        compact_cooldown: int,
+    ) -> tuple[bool, int]:
+        in_cooldown = compact_cooldown > 0
+        if in_cooldown:
+            compact_cooldown -= 1
+
+        if not in_cooldown and total_tokens:
+            settings = ensure_config(CompactionSettings)
+            if settings.enabled and should_compact(total_tokens, settings.context_window, settings):
+                logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
+                await self.tapes.compact(tape.name, reason="threshold")
+                compact_cooldown = COMPACT_COOLDOWN_STEPS
+
+        if can_overflow_compact and _is_context_length_error(error):
+            logger.warning("compaction: context overflow, triggering compaction. tape={} step={}", tape.name, step)
+            await self.tapes.compact(tape.name, reason="overflow")
+            await self.tapes.append_event(tape.name, "loop.step", {
+                "step": step,
+                "elapsed_ms": elapsed_ms,
+                "status": "compaction_overflow",
+                "error": error,
+                "date": datetime.now(UTC).isoformat(),
+            })
+            return True, compact_cooldown
+
+        return False, compact_cooldown
 
     def _load_skills_prompt(self, prompt: str, workspace: Path, allowed_skills: set[str] | None = None) -> str:
         skill_index = {
