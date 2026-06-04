@@ -233,7 +233,7 @@ def test_reload_plugins_drops_orphaned_tools_on_failure(monkeypatch: pytest.Monk
     framework._plugin_manager.register = failing_register  # type: ignore[method-assign]
 
     try:
-        status = framework.reload_plugins()
+        status = framework.reload_hooks()
     finally:
         framework._plugin_manager.register = original_register  # type: ignore[method-assign]
 
