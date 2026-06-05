@@ -16,6 +16,7 @@ Additional issues with the current system:
 2. **Simplicity**: No dependency on pip metadata caching for plugin discovery.
 3. **Isolation**: Each plugin's modules and tools are tracked independently for clean unload/reload.
 4. **Testability**: Plugin lifecycle can be tested with temporary directories.
+5. **Uniformity**: Builtin and external plugins share the same lifecycle. One manager, one path.
 
 ## Non-Goals
 
@@ -23,6 +24,7 @@ Additional issues with the current system:
 - Changing hook specifications (`hookspecs.py`) or hook execution (`hook_runtime.py`).
 - Subprocess isolation for plugins.
 - Remote/PyPI plugin distribution.
+- Changing `install`/`uninstall` CLI commands (out of scope).
 
 ## Design
 
@@ -69,7 +71,7 @@ The plugin directory is added to `sys.path` before importing, so the entry modul
 
 ### PluginManager Class
 
-A new `PluginManager` class (in `src/bub/plugin_manager.py`) extracts plugin lifecycle management from `BubFramework`. It owns the pluggy `PluginManager` instance (previously `BubFramework._plugin_manager`), which is now exposed as a property for `HookRuntime` and other consumers.
+A new `PluginManager` class (in `src/bub/plugin_manager.py`) is the **single owner** of all plugin lifecycle — including builtin. It owns the pluggy `PluginManager` instance (previously `BubFramework._plugin_manager`), which is exposed as a property for `HookRuntime` and other consumers.
 
 ```python
 @dataclass
@@ -79,54 +81,72 @@ class PluginSpec:
     path: Path
     version: str = ""
     description: str = ""
+    permanent: bool = False  # True for builtin
 
 @dataclass
 class PluginState:
     spec: PluginSpec
     instance: object
-    tools: set[str]
-    modules: set[str]
+    tools: set[str]       # REGISTRY keys owned by this plugin
+    modules: set[str]     # sys.modules keys owned by this plugin
 
 class PluginManager:
     def __init__(self, framework, plugin_dirs):
-        ...
+        self._framework = framework
+        self._plugin_dirs = plugin_dirs
+        self._pm = pluggy.PluginManager("bub")
+        self._pm.add_hookspecs(BubHookSpecs)
+        self._plugins: dict[str, PluginState] = {}
+        self._status: dict[str, PluginStatus] = {}
 
+    @property
+    def pluggy_manager(self) -> pluggy.PluginManager: ...
+
+    def load_builtin(self) -> None
+    def load_all_external(self) -> None
     def scan(self) -> list[PluginSpec]
-    def load_all(self) -> None
     def reload_all(self) -> dict[str, PluginStatus]
-    def get_plugin_status(self) -> dict[str, PluginStatus]
+    def get_status(self) -> dict[str, PluginStatus]
 ```
+
+**Builtin as a plugin**: `load_builtin()` constructs a `PluginSpec` with `permanent=True` and `path` pointing to the bub package's own `builtin/` directory, then calls the same internal `_load()` method used for external plugins. The builtin plugin's tools (registered into `REGISTRY` by `@tool` at import time) and modules are tracked identically. The `permanent` flag prevents `reload_all()` from unloading or reloading it.
 
 ### Load Flow
 
-For each plugin:
+The same `_load(spec)` method is used for both builtin and external plugins:
 
-1. Add plugin directory to `sys.path` (if not already present).
+1. Add the spec's `path` to `sys.path` (if not already present). For external plugins this is the plugin directory; for builtin it is the bub package root.
 2. Snapshot `REGISTRY.keys()` and `sys.modules.keys()`.
-3. Import the entry module via `importlib.import_module()`.
-4. Get the entry attribute from the module.
-5. If callable, instantiate with `instance = cls(framework)`.
-6. Register the instance with pluggy: `plugin_manager.register(instance, name=spec.name)`.
-7. Record new `REGISTRY` keys as the plugin's tools.
-8. Record new `sys.modules` keys as the plugin's modules.
+3. Parse `spec.entry` into `module_name` and `attribute_name`.
+4. Import the module via `importlib.import_module(module_name)`.
+5. Get the attribute from the module.
+6. If callable, instantiate with `instance = cls(framework)`.
+7. Register the instance with pluggy: `self._pm.register(instance, name=spec.name)`.
+8. Record `REGISTRY.keys() - snapshot` as the plugin's tools.
+9. Record `sys.modules.keys() - snapshot` as the plugin's modules.
+10. Store `PluginState` in `self._plugins[spec.name]`.
 
 ### Unload Flow
 
-1. Unregister from pluggy: `plugin_manager.unregister(name=spec.name)`.
+Refuses if `spec.permanent` is True.
+
+1. Unregister from pluggy: `self._pm.unregister(name=spec.name)`.
 2. Pop all tracked tools from `REGISTRY`.
 3. Remove all tracked modules from `sys.modules`.
-4. Return the old `PluginState` (for potential rollback).
+4. Remove from `self._plugins`.
+5. Return the old `PluginState` (for potential rollback).
 
 ### Reload Flow
 
 `reload_all()`:
 
-1. Call `scan()` to get the current set of plugins on disk.
-2. Compare with currently loaded plugins:
+1. Call `scan()` to get the current set of external plugins on disk.
+2. Compare with currently loaded non-permanent plugins:
    - **Removed** (loaded but not on disk): unload + clean up. Status: success with `detail="removed"`.
    - **Added** (on disk but not loaded): load. Status: success or failure.
    - **Existing** (on disk and currently loaded): always unload old, evict modules, load new. This avoids any change-detection complexity and ensures correctness. On failure: rollback (restore old plugin state).
-3. Return `dict[str, PluginStatus]`.
+3. Permanent plugins (builtin) are never touched — their status is carried forward unchanged.
+4. Return `dict[str, PluginStatus]`.
 
 ### Error Handling
 
@@ -140,22 +160,29 @@ For each plugin:
 
 ### Integration with BubFramework
 
-`BubFramework` delegates plugin management to `PluginManager`:
+`BubFramework` delegates all plugin management to `PluginManager`. The pluggy `PluginManager` instance and `HookRuntime` are now created by `PluginManager` and accessed via properties:
 
 ```python
 class BubFramework:
     def __init__(self, ...):
         self._plugin_mgr = PluginManager(self, plugin_dirs)
+        self._hook_runtime = HookRuntime(self._plugin_mgr.pluggy_manager)
 
     def load_hooks(self):
-        self._load_builtin_hooks()
-        self._plugin_mgr.load_all()
+        self._plugin_mgr.load_builtin()
+        self._plugin_mgr.load_all_external()
 
     def reload_hooks(self):
         return self._plugin_mgr.reload_all()
 ```
 
-The builtin hooks loading (`_load_builtin_hooks`) remains unchanged. Builtin tools continue to register into `REGISTRY` at import time via `@tool`. `PluginManager` only manages external plugins.
+The old `_load_builtin_hooks()`, `_unload_external_plugins()`, `_restore_plugin()`, `_reload_plugin_from_entry_point()`, `_drop_tools()`, `_handle_plugin_*()`, and the module-level `_clear_plugin_modules()` are all removed from `framework.py`. Their logic lives in `PluginManager`.
+
+Builtin tools still register into `REGISTRY` at import time via `@tool` — no change to `builtin/tools.py` or the `@tool` decorator. `PluginManager` tracks them the same way it tracks external plugin tools (REGISTRY key snapshots).
+
+### Integration with HookRuntime
+
+`HookRuntime` currently receives a `pluggy.PluginManager` in its constructor. This doesn't change — `BubFramework` passes `self._plugin_mgr.pluggy_manager` instead of creating its own pluggy manager. `HookRuntime` code is untouched.
 
 ### Integration with reload.plugins Tool
 
@@ -166,10 +193,14 @@ The `reload.plugins` tool in `builtin/tools.py` calls `framework.reload_hooks()`
 | File | Change |
 |------|--------|
 | `src/bub/plugin_manager.py` | **New file**: `PluginSpec`, `PluginState`, `PluginManager` |
-| `src/bub/framework.py` | Remove `load_hooks` plugin loop, `reload_hooks`, and all `_plugin_*` helpers. Delegate to `PluginManager`. |
-| `src/bub/builtin/tools.py` | No change to `reload.plugins` tool (it calls `framework.reload_hooks()` which now delegates). |
-| `src/bub/builtin/cli.py` | `install`/`uninstall` commands currently use pip. Updating them to manage local plugin directories is out of scope for this redesign. The reload system works regardless of how plugins arrive in the directory. |
-| `tests/test_reload_plugins.py` | Rewrite tests to use filesystem-based discovery (tmp directories with bub.toml). |
+| `src/bub/framework.py` | Remove `_load_builtin_hooks`, `load_hooks` plugin loop, `reload_hooks`, all `_plugin_*` helpers, and module-level `_clear_plugin_modules`. Create `PluginManager` in `__init__`, delegate to it. |
+| `src/bub/hook_runtime.py` | No change (still receives `pluggy.PluginManager`). |
+| `src/bub/tools.py` | No change (`REGISTRY`, `@tool` untouched). |
+| `src/bub/builtin/tools.py` | No change (`reload.plugins` calls `framework.reload_hooks()` which delegates). |
+| `src/bub/builtin/hook_impl.py` | No change (`BuiltinImpl` class untouched). |
+| `src/bub/builtin/cli.py` | No change (`install`/`uninstall` out of scope). |
+| `src/bub/__main__.py` | No change (calls `framework.load_hooks()` as before). |
+| `tests/test_reload_plugins.py` | Rewrite to use filesystem-based discovery with tmp directories. |
 
 ### Test Strategy
 
@@ -182,10 +213,13 @@ All tests use `tmp_path` to create temporary plugin directories.
 | `test_scan_handles_malformed_manifest` | Bad bub.toml is reported, not crashed |
 | `test_load_registers_plugin` | Plugin tools appear in REGISTRY, hooks in pluggy |
 | `test_unload_removes_plugin` | Tools removed from REGISTRY, hooks unregistered, modules evicted |
+| `test_unload_refuses_permanent` | Builtin plugin cannot be unloaded |
 | `test_reload_detects_new_plugin` | New plugin directory is loaded on reload |
 | `test_reload_detects_removed_plugin` | Deleted plugin directory triggers clean unload |
 | `test_reload_handles_changed_plugin` | Modified plugin is unloaded and reloaded |
 | `test_reload_rolls_back_on_failure` | Failed reload restores old plugin state |
+| `test_reload_skips_permanent` | Builtin plugin is not touched during reload |
 | `test_reload_multiple_directories` | Project and user plugin dirs are both scanned |
 | `test_reload_plugins_tool_report` | Tool returns correct formatted output |
 | `test_module_eviction_is_scoped` | Only the plugin's modules are evicted, not framework's |
+| `test_builtin_tracked_as_plugin` | Builtin appears in `_plugins` and `_status` with `permanent=True` |
