@@ -20,6 +20,21 @@ def estimate_tokens(message: dict[str, Any]) -> int:
     return 0
 
 
+def estimate_entry_tokens(entry: TapeEntry) -> int:
+    if entry.kind == "message":
+        return estimate_tokens(entry.payload)
+    if entry.kind == "tool_call":
+        return 50
+    if entry.kind == "tool_result":
+        results = entry.payload.get("results", [])
+        total = 0
+        for r in results:
+            text = r if isinstance(r, str) else json.dumps(r, ensure_ascii=False)
+            total += len(text) // 4
+        return total
+    return 0
+
+
 def truncate_tool_result(content: str) -> str:
     if len(content) <= TOOL_RESULT_TRUNCATE_AT:
         return content

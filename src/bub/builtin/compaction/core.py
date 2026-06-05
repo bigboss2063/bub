@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -14,7 +13,7 @@ from bub.builtin.compaction.types import (
     FileOperations,
 )
 from bub.builtin.compaction.utils import (
-    estimate_tokens,
+    estimate_entry_tokens,
     extract_file_operations,
     serialize_messages,
 )
@@ -120,16 +119,7 @@ def find_cut_point(
     accumulated = 0
     cut_offset = 0
     for i in range(len(scannable) - 1, -1, -1):
-        entry = scannable[i]
-        if entry.kind == "message":
-            accumulated += estimate_tokens(entry.payload)
-        elif entry.kind == "tool_call":
-            accumulated += 50
-        elif entry.kind == "tool_result":
-            results = entry.payload.get("results", [])
-            for r in results:
-                text = r if isinstance(r, str) else json.dumps(r, ensure_ascii=False)
-                accumulated += len(text) // 4
+        accumulated += estimate_entry_tokens(scannable[i])
         if accumulated >= keep_recent_tokens:
             cut_offset = i
             break
@@ -318,9 +308,7 @@ async def compact(
         llm, to_summarize, boundary_start, cut, file_ops, previous_summary, instructions
     )
 
-    tokens_before = sum(
-        estimate_tokens(e.payload) for e in to_summarize if e.kind == "message"
-    )
+    tokens_before = sum(estimate_entry_tokens(e) for e in to_summarize)
 
     if write_anchor is not None:
         await write_anchor(

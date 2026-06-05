@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bub.builtin.compaction.utils import (
+    estimate_entry_tokens,
     estimate_tokens,
     extract_file_operations,
     serialize_messages,
@@ -26,6 +27,29 @@ def test_estimate_tokens_list_content() -> None:
 def test_estimate_tokens_no_content() -> None:
     msg = {"role": "user"}
     assert estimate_tokens(msg) == 0
+
+
+def test_estimate_entry_tokens_message() -> None:
+    entry = _make_message_entry({"role": "user", "content": "hello world!!"})
+    assert estimate_entry_tokens(entry) == 3
+
+
+def test_estimate_entry_tokens_tool_call() -> None:
+    entry = _make_tool_call_entry([
+        {"id": "c1", "function": {"name": "fs.read", "arguments": "{}"}},
+    ])
+    assert estimate_entry_tokens(entry) == 50
+
+
+def test_estimate_entry_tokens_tool_result() -> None:
+    entry = _make_tool_result_entry(["a" * 100])
+    assert estimate_entry_tokens(entry) == 25
+
+
+def test_estimate_entry_tokens_unknown_kind() -> None:
+    from republic import TapeEntry
+    entry = TapeEntry(id=0, kind="event", payload={})
+    assert estimate_entry_tokens(entry) == 0
 
 
 def test_truncate_tool_result_short() -> None:
