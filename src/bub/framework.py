@@ -147,6 +147,9 @@ class BubFramework:
 
         importlib.invalidate_caches()
 
+        previously_loaded = {
+            name for name, status in self._plugin_status.items() if status.is_success
+        }
         old_plugins, old_tools, old_tool_objects = self._unload_external_plugins()
 
         reloaded_status: dict[str, PluginStatus] = {}
@@ -159,10 +162,16 @@ class BubFramework:
             try:
                 self._reload_plugin_from_entry_point(entry_point)
             except (ModuleNotFoundError, FileNotFoundError) as exc:
-                logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
-                for tool_name in set(REGISTRY.keys()) - before:
-                    REGISTRY.pop(tool_name, None)
-                reloaded_status[plugin_name] = PluginStatus(is_success=True, detail="removed")
+                if plugin_name in previously_loaded:
+                    logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
+                    for tool_name in set(REGISTRY.keys()) - before:
+                        REGISTRY.pop(tool_name, None)
+                    reloaded_status[plugin_name] = PluginStatus(is_success=True, detail="removed")
+                else:
+                    logger.warning(f"Failed to load new plugin '{plugin_name}': {exc}")
+                    for tool_name in set(REGISTRY.keys()) - before:
+                        REGISTRY.pop(tool_name, None)
+                    reloaded_status[plugin_name] = PluginStatus(is_success=False, detail=str(exc))
             except Exception as exc:
                 logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
                 for tool_name in set(REGISTRY.keys()) - before:

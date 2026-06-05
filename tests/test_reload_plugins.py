@@ -359,6 +359,53 @@ def test_reload_hooks_non_import_error_still_rolls_back(monkeypatch: pytest.Monk
     assert "v1" in prompt
 
 
+def test_reload_hooks_new_plugin_module_not_found_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A never-loaded plugin that raises ModuleNotFoundError should be marked as failed, not removed."""
+    framework = BubFramework()
+
+    def load_plugin():
+        raise ModuleNotFoundError("No module named 'fresh_plugin'")
+
+    entry_point = SimpleNamespace(
+        name="fresh-plugin",
+        load=load_plugin,
+        value="fresh_plugin:Plugin",
+    )
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+
+    framework.load_hooks()
+
+    assert framework._plugin_status["fresh-plugin"].is_success is False
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+    status = framework.reload_hooks()
+
+    assert status["fresh-plugin"].is_success is False
+    assert "No module named 'fresh_plugin'" in status["fresh-plugin"].detail
+
+
+def test_reload_hooks_new_plugin_file_not_found_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A never-loaded plugin that raises FileNotFoundError should be marked as failed, not removed."""
+    framework = BubFramework()
+
+    def load_plugin():
+        raise FileNotFoundError("plugin directory not found")
+
+    entry_point = SimpleNamespace(
+        name="unseen-plugin",
+        load=load_plugin,
+        value="unseen_plugin:Plugin",
+    )
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+
+    framework.load_hooks()
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+    status = framework.reload_hooks()
+
+    assert status["unseen-plugin"].is_success is False
+    assert "plugin directory not found" in status["unseen-plugin"].detail
+
+
 @pytest.mark.asyncio
 async def test_reload_plugins_tool_returns_formatted_report() -> None:
     """The reload.plugins tool should return a human-readable status report."""
