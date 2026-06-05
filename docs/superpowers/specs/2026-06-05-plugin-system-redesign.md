@@ -32,10 +32,12 @@ Additional issues with the current system:
 
 Plugins are discovered by scanning directories for subdirectories containing a `bub.toml` manifest file.
 
-**Scan paths** (in priority order, first match wins):
+**Scan paths** (in priority order):
 
 1. `{workspace}/.bub/plugins/` — project-level plugins
 2. `~/.bub/plugins/` — user-level plugins
+
+Both directories are scanned and all valid plugins found are loaded. Plugin names are unique within a single directory (enforced by the filesystem). The priority order only matters for debugging or documentation purposes; there is no "first match wins" conflict resolution because a plugin name cannot appear twice in the same directory.
 
 ### Plugin Manifest: bub.toml
 
@@ -91,7 +93,7 @@ class PluginState:
     modules: set[str]     # sys.modules keys owned by this plugin
 
 class PluginManager:
-    def __init__(self, framework, plugin_dirs):
+    def __init__(self, framework: BubFramework, plugin_dirs: list[Path]):
         self._framework = framework
         self._plugin_dirs = plugin_dirs
         self._pm = pluggy.PluginManager("bub")
@@ -110,6 +112,26 @@ class PluginManager:
 ```
 
 **Builtin as a plugin**: `load_builtin()` constructs a `PluginSpec` with `permanent=True` and `path` pointing to the bub package's own `builtin/` directory, then calls the same internal `_load()` method used for external plugins. The builtin plugin's tools (registered into `REGISTRY` by `@tool` at import time) and modules are tracked identically. The `permanent` flag prevents `reload_all()` from unloading or reloading it.
+
+### PluginStatus
+
+```python
+from enum import Enum
+from dataclasses import dataclass
+
+class PluginStatusCode(Enum):
+    LOADED = "loaded"
+    REMOVED = "removed"
+    FAILED = "failed"
+
+@dataclass(frozen=True)
+class PluginStatus:
+    ok: bool
+    code: PluginStatusCode
+    detail: str = ""
+```
+
+`reload_all()` returns `dict[str, PluginStatus]`. The `reload_plugins` tool formats this into a human-readable report (one line per plugin, with status icon and detail).
 
 ### Load Flow
 
@@ -142,9 +164,9 @@ Refuses if `spec.permanent` is True.
 
 1. Call `scan()` to get the current set of external plugins on disk.
 2. Compare with currently loaded non-permanent plugins:
-   - **Removed** (loaded but not on disk): unload + clean up. Status: success with `detail="removed"`.
-   - **Added** (on disk but not loaded): load. Status: success or failure.
-   - **Existing** (on disk and currently loaded): always unload old, evict modules, load new. This avoids any change-detection complexity and ensures correctness. On failure: rollback (restore old plugin state).
+    - **Removed** (loaded but not on disk): unload + clean up. Status: `PluginStatus(ok=True, code=REMOVED, detail="removed")`.
+    - **Added** (on disk but not loaded): load. Status: `PluginStatus(ok=True, code=LOADED)` or `PluginStatus(ok=False, code=FAILED, detail="...")`.
+    - **Existing** (on disk and currently loaded): always unload old, evict modules, load new. This avoids any change-detection complexity and ensures correctness. On failure: rollback (restore old plugin state). Status: `PluginStatus(ok=True, code=LOADED)` or `PluginStatus(ok=False, code=FAILED, detail="...")`.
 3. Permanent plugins (builtin) are never touched — their status is carried forward unchanged.
 4. Return `dict[str, PluginStatus]`.
 
@@ -152,11 +174,13 @@ Refuses if `spec.permanent` is True.
 
 | Scenario | Behavior |
 |----------|----------|
-| Plugin directory deleted | Detected by scan. Unload + clean up. Status: `"removed"` (success). |
-| `bub.toml` missing or malformed | Skip plugin. Status: failure with detail. |
-| Module import fails | Rollback: restore old tools to REGISTRY, re-register old plugin with pluggy. Status: failure. |
+| Plugin directory deleted | Detected by scan. Unload + clean up. Status: `PluginStatus(ok=True, code=REMOVED, detail="removed")`. |
+| `bub.toml` missing or malformed | Skip plugin. Status: `PluginStatus(ok=False, code=FAILED, detail="...")`. |
+| Module import fails | Rollback: restore old tools to REGISTRY, re-register old plugin with pluggy. Status: `PluginStatus(ok=False, code=FAILED, detail="...")`. |
 | Plugin instantiation raises | Same rollback as import failure. |
-| Pluggy registration fails | Pop newly added tools from REGISTRY, evict new modules. Status: failure. |
+| Pluggy registration fails | Pop newly added tools from REGISTRY, evict new modules. Status: `PluginStatus(ok=False, code=FAILED, detail="...")`. |
+
+**Load failure handling**: If an external plugin fails to load during `load_all_external()` or `reload_all()`, the error is recorded in `PluginStatus` and the framework continues loading other plugins. The failure is visible in the `reload_plugins` tool output.
 
 ### Integration with BubFramework
 
