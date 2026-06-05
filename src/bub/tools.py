@@ -29,9 +29,9 @@ def _add_logging(tool: Tool) -> Tool:
             result = tool.handler(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception:
+        except Exception as exc:
             elapsed_time = (time.monotonic() - start) * 1000
-            logger.exception("tool.call.error name={} elapsed_time={:.2f}ms", tool.name, elapsed_time)
+            logger.info("tool.call.error name={} elapsed_time={:.2f}ms error={}", tool.name, elapsed_time, exc)
             raise
         else:
             elapsed_time = (time.monotonic() - start) * 1000
