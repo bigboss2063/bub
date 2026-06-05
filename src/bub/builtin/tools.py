@@ -345,18 +345,18 @@ async def reload_plugins(*, context: ToolContext) -> str:
     """Reload external plugins without restarting the process."""
     agent = _get_agent(context)
     status = await asyncio.to_thread(agent.framework.reload_hooks)
-    ok = sum(1 for s in status.values() if s.is_success and s.detail != "removed")
-    removed = sum(1 for s in status.values() if s.is_success and s.detail == "removed")
-    failed = sum(1 for s in status.values() if not s.is_success)
+    ok = sum(1 for s in status.values() if s.ok and s.code.name != "REMOVED")
+    removed = sum(1 for s in status.values() if s.ok and s.code.name == "REMOVED")
+    failed = sum(1 for s in status.values() if not s.ok)
     lines = [f"Plugins reloaded ({ok} ok, {removed} removed, {failed} failed):"]
     for name, plugin_status in status.items():
-        if plugin_status.detail == "removed":
+        if plugin_status.ok and plugin_status.code.name == "REMOVED":
             marker = "\u2013"
-        elif plugin_status.is_success:
+        elif plugin_status.ok:
             marker = "✓"
         else:
             marker = "✗"
-        detail = f": {plugin_status.detail}" if plugin_status.detail and plugin_status.detail != "removed" else ""
+        detail = f": {plugin_status.detail}" if plugin_status.detail and plugin_status.code.name != "REMOVED" else ""
         lines.append(f"  {marker} {name}{detail}")
     return "\n".join(lines)
 
