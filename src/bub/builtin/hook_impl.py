@@ -34,9 +34,9 @@ MODEL_PROVIDER_CHOICES: tuple[str, ...] = (
 )
 API_FORMAT_CHOICES: tuple[str, ...] = ("completion", "responses", "messages")
 DEFAULT_SYSTEM_PROMPT = """\
-<general_instruct>
-Call tools or skills to finish the task.
-</general_instruct>
+You are an expert coding assistant operating inside bub, an agent framework. \
+You help users by reading files, executing commands, editing code, writing new files, and communicating through channels.
+
 <response_instruct>
 Before ending this run, you MUST determine whether a response needs to be sent via channel, checking the following conditions:
 1. Has the user asked you a question waiting for your answer?
@@ -245,8 +245,16 @@ class BuiltinImpl:
 
     @hookimpl
     def system_prompt(self, prompt: str | list[dict], state: State) -> str:
-        # Read the content of AGENTS.md under workspace
-        return DEFAULT_SYSTEM_PROMPT + "\n\n" + self._read_agents_file(state)
+        agents_content = self._read_agents_file(state)
+        if not agents_content:
+            return DEFAULT_SYSTEM_PROMPT
+        return (
+            DEFAULT_SYSTEM_PROMPT
+            + "\n\n<project_context>\n\n"
+            + "Project-specific instructions and guidelines:\n\n"
+            + f'<project_instructions path="AGENTS.md">\n{agents_content}\n</project_instructions>\n\n'
+            + "</project_context>"
+        )
 
     @hookimpl
     def provide_channels(self, message_handler: MessageHandler) -> list[Channel]:

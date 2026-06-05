@@ -625,13 +625,26 @@ class Agent:
                     model=model,
                 )
 
+    def _build_guidelines(self, tools: Iterable[Tool]) -> str:
+        tool_names = {t.name for t in tools}
+        lines: list[str] = []
+        if "bash" in tool_names and "read" in tool_names:
+            lines.append("Prefer read tool over bash for reading files")
+        if "bash" in tool_names and "write" in tool_names:
+            lines.append("Prefer write/edit tools over bash for file modifications")
+        lines.append("Be concise in your responses")
+        lines.append("Show file paths clearly when working with files")
+        return "<guidelines>\n" + "\n".join(f"- {line}" for line in lines) + "\n</guidelines>"
+
     def _system_prompt(
         self, prompt: str, state: State, allowed_skills: set[str] | None = None, tools: Iterable[Tool] | None = None
     ) -> str:
+        resolved_tools = list(tools if tools is not None else REGISTRY.values())
         blocks: list[str] = []
         if result := self.framework.get_system_prompt(prompt=prompt, state=state):
             blocks.append(result)
-        tools_prompt = render_tools_prompt(tools if tools is not None else REGISTRY.values())
+        blocks.append(self._build_guidelines(resolved_tools))
+        tools_prompt = render_tools_prompt(resolved_tools)
         if tools_prompt:
             blocks.append(tools_prompt)
         workspace = workspace_from_state(state)
