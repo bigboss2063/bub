@@ -140,12 +140,44 @@ class BubFramework:
             plugin = plugin(self)
         self._plugin_manager.register(plugin, name=entry_point.name)
 
+    @staticmethod
+    def _drop_tools(before: set[str]) -> None:
+        for tool_name in set(REGISTRY.keys()) - before:
+            REGISTRY.pop(tool_name, None)
+
+    def _handle_plugin_removed(self, plugin_name: str, exc: Exception, before: set[str]) -> PluginStatus:
+        logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
+        self._drop_tools(before)
+        return PluginStatus(is_success=True, detail="removed")
+
+    def _handle_plugin_load_failed(self, plugin_name: str, exc: Exception, before: set[str]) -> PluginStatus:
+        logger.warning(f"Failed to load new plugin '{plugin_name}': {exc}")
+        self._drop_tools(before)
+        return PluginStatus(is_success=False, detail=str(exc))
+
+    def _handle_plugin_reload_failed(
+        self,
+        plugin_name: str,
+        exc: Exception,
+        before: set[str],
+        old_plugins: dict[str, Any],
+        old_tools: dict[str, set[str]],
+        old_tool_objects: dict[str, dict[str, Any]],
+    ) -> PluginStatus:
+        logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
+        self._drop_tools(before)
+        self._restore_plugin(plugin_name, old_plugins, old_tools, old_tool_objects)
+        return PluginStatus(is_success=False, detail=str(exc))
+
     def reload_hooks(self) -> dict[str, PluginStatus]:
         """Reload external plugins while preserving builtins and rollback on failure."""
         import importlib
         import importlib.metadata
+        import site
 
         importlib.invalidate_caches()
+        for sitedir in site.getsitepackages():
+            site.addsitedir(sitedir)
 
         previously_loaded = {
             name for name, status in self._plugin_status.items() if status.is_success
@@ -163,21 +195,13 @@ class BubFramework:
                 self._reload_plugin_from_entry_point(entry_point)
             except (ModuleNotFoundError, FileNotFoundError) as exc:
                 if plugin_name in previously_loaded:
-                    logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
-                    for tool_name in set(REGISTRY.keys()) - before:
-                        REGISTRY.pop(tool_name, None)
-                    reloaded_status[plugin_name] = PluginStatus(is_success=True, detail="removed")
+                    reloaded_status[plugin_name] = self._handle_plugin_removed(plugin_name, exc, before)
                 else:
-                    logger.warning(f"Failed to load new plugin '{plugin_name}': {exc}")
-                    for tool_name in set(REGISTRY.keys()) - before:
-                        REGISTRY.pop(tool_name, None)
-                    reloaded_status[plugin_name] = PluginStatus(is_success=False, detail=str(exc))
+                    reloaded_status[plugin_name] = self._handle_plugin_load_failed(plugin_name, exc, before)
             except Exception as exc:
-                logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
-                for tool_name in set(REGISTRY.keys()) - before:
-                    REGISTRY.pop(tool_name, None)
-                self._restore_plugin(plugin_name, old_plugins, old_tools, old_tool_objects)
-                reloaded_status[plugin_name] = PluginStatus(is_success=False, detail=str(exc))
+                reloaded_status[plugin_name] = self._handle_plugin_reload_failed(
+                    plugin_name, exc, before, old_plugins, old_tools, old_tool_objects,
+                )
             else:
                 self._plugin_tools[plugin_name] = set(REGISTRY.keys()) - before
                 reloaded_status[plugin_name] = PluginStatus(is_success=True)
