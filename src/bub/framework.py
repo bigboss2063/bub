@@ -125,16 +125,13 @@ class BubFramework:
         old_plugin = old_plugins.get(plugin_name)
         if old_plugin is not None:
             self._plugin_manager.register(old_plugin, name=plugin_name)
+            self._plugin_tools[plugin_name] = old_tools.get(plugin_name, set())
         for tool_name, tool_obj in old_tool_objects.get(plugin_name, {}).items():
             if tool_obj is not None:
                 REGISTRY[tool_name] = tool_obj
-        self._plugin_tools[plugin_name] = old_tools.get(plugin_name, set())
 
     def _reload_plugin_from_entry_point(self, entry_point: Any) -> None:
-        import importlib
-
         _clear_plugin_modules(entry_point.value)
-        importlib.invalidate_caches()
         plugin = entry_point.load()
         if callable(plugin):
             plugin = plugin(self)
@@ -176,13 +173,13 @@ class BubFramework:
         import site
 
         importlib.invalidate_caches()
+
         for sitedir in site.getsitepackages():
             site.addsitedir(sitedir)
+        sys.path[:] = list(dict.fromkeys(sys.path))
 
-        previously_loaded = {
-            name for name, status in self._plugin_status.items() if status.is_success
-        }
         old_plugins, old_tools, old_tool_objects = self._unload_external_plugins()
+        previously_loaded = {name for name, status in self._plugin_status.items() if status.is_success}
 
         reloaded_status: dict[str, PluginStatus] = {}
         if "builtin" in self._plugin_status:

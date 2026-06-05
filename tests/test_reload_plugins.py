@@ -406,6 +406,43 @@ def test_reload_hooks_new_plugin_file_not_found_is_failed(monkeypatch: pytest.Mo
     assert "plugin directory not found" in status["unseen-plugin"].detail
 
 
+def test_restore_plugin_does_not_track_tools_for_failed_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rollback of a previously-failed plugin should not add it to _plugin_tools."""
+    framework = BubFramework()
+
+    class PluginV1:
+        def __init__(self, fw):
+            pass
+
+        @hookimpl
+        def system_prompt(self, prompt, state):
+            return "v1"
+
+    call_count = [0]
+
+    def load_plugin():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return PluginV1
+        raise RuntimeError("plugin broke")
+
+    entry_point = SimpleNamespace(
+        name="my-plugin",
+        load=load_plugin,
+        value="my_plugin:PluginV1",
+    )
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+    framework.load_hooks()
+
+    assert "my-plugin" in framework._plugin_tools
+
+    status = framework.reload_hooks()
+
+    assert status["my-plugin"].is_success is False
+    assert "my-plugin" in framework._plugin_tools
+    assert framework._plugin_tools["my-plugin"] == set()
+
+
 @pytest.mark.asyncio
 async def test_reload_plugins_tool_returns_formatted_report() -> None:
     """The reload.plugins tool should return a human-readable status report."""
