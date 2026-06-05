@@ -142,7 +142,10 @@ class BubFramework:
 
     def reload_hooks(self) -> dict[str, PluginStatus]:
         """Reload external plugins while preserving builtins and rollback on failure."""
+        import importlib
         import importlib.metadata
+
+        importlib.invalidate_caches()
 
         old_plugins, old_tools, old_tool_objects = self._unload_external_plugins()
 
