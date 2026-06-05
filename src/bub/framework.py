@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import pluggy
 import typer
 from dotenv import load_dotenv
 from loguru import logger
@@ -20,8 +17,7 @@ from republic.tape import TapeStore
 from bub import configure
 from bub.envelope import content_of, field_of, unpack_batch
 from bub.hook_runtime import _SKIP_VALUE, HookRuntime
-from bub.hookspecs import BUB_HOOK_NAMESPACE, BubHookSpecs
-from bub.tools import REGISTRY
+from bub.plugin_manager import PluginManager, PluginStatus
 from bub.turn_admission import AdmitDecision, SteeringBuffer, TurnSnapshot
 from bub.types import Envelope, MessageHandler, OutboundChannelRouter, TurnResult
 
@@ -34,177 +30,42 @@ DEFAULT_HOME = Path.home() / ".bub"
 DEFAULT_CONFIG_FILE = (DEFAULT_HOME / "config.yml").resolve()
 
 
-def _clear_plugin_modules(entry_point_value: str) -> None:
-    """Remove plugin modules from sys.modules to allow re-import."""
-    module_name = entry_point_value.split(":")[0]
-    root = module_name.split(".")[0]
-    to_remove = [key for key in sys.modules if key == root or key.startswith(f"{root}.")]
-    for key in to_remove:
-        del sys.modules[key]
-
-
-@dataclass(frozen=True)
-class PluginStatus:
-    is_success: bool
-    detail: str | None = None
-
-
 class BubFramework:
     """Minimal framework core. Everything grows from hook skills."""
 
     def __init__(self, config_file: Path = DEFAULT_CONFIG_FILE) -> None:
         self.workspace = Path.cwd().resolve()
         self.config_file = config_file.resolve()
-        self._plugin_manager = pluggy.PluginManager(BUB_HOOK_NAMESPACE)
-        self._plugin_manager.add_hookspecs(BubHookSpecs)
-        self._hook_runtime = HookRuntime(self._plugin_manager)
-        self._plugin_status: dict[str, PluginStatus] = {}
-        self._plugin_tools: dict[str, set[str]] = {}
+
+        plugin_dirs = [
+            self.workspace / ".bub" / "plugins",
+        ]
+        try:
+            plugin_dirs.append(Path.home() / ".bub" / "plugins")
+        except RuntimeError:
+            pass
+
+        self._plugin_mgr = PluginManager(self, plugin_dirs)
+        self._hook_runtime = HookRuntime(self._plugin_mgr.pluggy_manager)
         self._outbound_router: OutboundChannelRouter | None = None
         self._steering_buffers: dict[str, SteeringBuffer] = {}
         self._tape_store: TapeStore | AsyncTapeStore | None = None
         configure.load(self.config_file)
 
-    def _load_builtin_hooks(self) -> None:
-        from bub.builtin.hook_impl import BuiltinImpl
-
-        impl = BuiltinImpl(self)
-
-        try:
-            self._plugin_manager.register(impl, name="builtin")
-        except Exception as exc:
-            self._plugin_status["builtin"] = PluginStatus(is_success=False, detail=str(exc))
-        else:
-            self._plugin_status["builtin"] = PluginStatus(is_success=True)
-
     def load_hooks(self) -> None:
-        import importlib.metadata
-
-        pre_builtin = set(REGISTRY.keys())
-        self._load_builtin_hooks()
-        # Track only the tools the builtin plugin actually added, not whatever
-        # REGISTRY happened to contain before load_hooks ran.
-        self._plugin_tools["builtin"] = set(REGISTRY.keys()) - pre_builtin
-
-        for entry_point in importlib.metadata.entry_points(group="bub"):
-            before = set(REGISTRY.keys())
-            try:
-                plugin = entry_point.load()
-                if callable(plugin):  # Support entry points that are classes
-                    plugin = plugin(self)
-                self._plugin_manager.register(plugin, name=entry_point.name)
-            except Exception as exc:
-                logger.warning(f"Failed to load plugin '{entry_point.name}': {exc}")
-                for tool_name in set(REGISTRY.keys()) - before:
-                    REGISTRY.pop(tool_name, None)
-                self._plugin_status[entry_point.name] = PluginStatus(is_success=False, detail=str(exc))
-            else:
-                self._plugin_tools[entry_point.name] = set(REGISTRY.keys()) - before
-                self._plugin_status[entry_point.name] = PluginStatus(is_success=True)
-
-    def _unload_external_plugins(self) -> tuple[dict[str, Any], dict[str, set[str]], dict[str, dict[str, Any]]]:
-        old_plugins: dict[str, Any] = {}
-        old_tools: dict[str, set[str]] = {}
-        old_tool_objects: dict[str, dict[str, Any]] = {}
-
-        for name in [plugin_name for plugin_name in self._plugin_status if plugin_name != "builtin"]:
-            old_plugins[name] = self._plugin_manager.unregister(name=name)
-            tool_names = self._plugin_tools.pop(name, set())
-            old_tools[name] = tool_names
-            old_tool_objects[name] = {tool_name: REGISTRY.pop(tool_name, None) for tool_name in tool_names}
-
-        return old_plugins, old_tools, old_tool_objects
-
-    def _restore_plugin(
-        self,
-        plugin_name: str,
-        old_plugins: dict[str, Any],
-        old_tools: dict[str, set[str]],
-        old_tool_objects: dict[str, dict[str, Any]],
-    ) -> None:
-        old_plugin = old_plugins.get(plugin_name)
-        if old_plugin is not None:
-            self._plugin_manager.register(old_plugin, name=plugin_name)
-            self._plugin_tools[plugin_name] = old_tools.get(plugin_name, set())
-        for tool_name, tool_obj in old_tool_objects.get(plugin_name, {}).items():
-            if tool_obj is not None:
-                REGISTRY[tool_name] = tool_obj
-
-    def _reload_plugin_from_entry_point(self, entry_point: Any) -> None:
-        _clear_plugin_modules(entry_point.value)
-        plugin = entry_point.load()
-        if callable(plugin):
-            plugin = plugin(self)
-        self._plugin_manager.register(plugin, name=entry_point.name)
-
-    @staticmethod
-    def _drop_tools(before: set[str]) -> None:
-        for tool_name in set(REGISTRY.keys()) - before:
-            REGISTRY.pop(tool_name, None)
-
-    def _handle_plugin_removed(self, plugin_name: str, exc: Exception, before: set[str]) -> PluginStatus:
-        logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
-        self._drop_tools(before)
-        return PluginStatus(is_success=True, detail="removed")
-
-    def _handle_plugin_load_failed(self, plugin_name: str, exc: Exception, before: set[str]) -> PluginStatus:
-        logger.warning(f"Failed to load new plugin '{plugin_name}': {exc}")
-        self._drop_tools(before)
-        return PluginStatus(is_success=False, detail=str(exc))
-
-    def _handle_plugin_reload_failed(
-        self,
-        plugin_name: str,
-        exc: Exception,
-        before: set[str],
-        old_plugins: dict[str, Any],
-        old_tools: dict[str, set[str]],
-        old_tool_objects: dict[str, dict[str, Any]],
-    ) -> PluginStatus:
-        logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
-        self._drop_tools(before)
-        self._restore_plugin(plugin_name, old_plugins, old_tools, old_tool_objects)
-        return PluginStatus(is_success=False, detail=str(exc))
+        self._plugin_mgr.load_builtin()
+        self._plugin_mgr.load_all_external()
 
     def reload_hooks(self) -> dict[str, PluginStatus]:
-        """Reload external plugins while preserving builtins and rollback on failure."""
-        import importlib
-        import importlib.metadata
-        import site
+        return self._plugin_mgr.reload_all()
 
-        importlib.invalidate_caches()
+    @property
+    def _plugin_manager(self):
+        return self._plugin_mgr.pluggy_manager
 
-        for sitedir in site.getsitepackages():
-            site.addsitedir(sitedir)
-        sys.path[:] = list(dict.fromkeys(sys.path))
-
-        old_plugins, old_tools, old_tool_objects = self._unload_external_plugins()
-        previously_loaded = {name for name, status in self._plugin_status.items() if status.is_success}
-
-        reloaded_status: dict[str, PluginStatus] = {}
-        if "builtin" in self._plugin_status:
-            reloaded_status["builtin"] = self._plugin_status["builtin"]
-
-        for entry_point in importlib.metadata.entry_points(group="bub"):
-            plugin_name = entry_point.name
-            before = set(REGISTRY.keys())
-            try:
-                self._reload_plugin_from_entry_point(entry_point)
-            except (ModuleNotFoundError, FileNotFoundError) as exc:
-                if plugin_name in previously_loaded:
-                    reloaded_status[plugin_name] = self._handle_plugin_removed(plugin_name, exc, before)
-                else:
-                    reloaded_status[plugin_name] = self._handle_plugin_load_failed(plugin_name, exc, before)
-            except Exception as exc:
-                reloaded_status[plugin_name] = self._handle_plugin_reload_failed(
-                    plugin_name, exc, before, old_plugins, old_tools, old_tool_objects,
-                )
-            else:
-                self._plugin_tools[plugin_name] = set(REGISTRY.keys()) - before
-                reloaded_status[plugin_name] = PluginStatus(is_success=True)
-
-        self._plugin_status = reloaded_status
-        return dict(self._plugin_status)
+    @property
+    def _plugin_status(self) -> dict[str, PluginStatus]:
+        return self._plugin_mgr.get_status()
 
     def create_cli_app(self) -> typer.Typer:
         """Create CLI app by collecting commands from hooks. Can be used for custom CLI entry point."""

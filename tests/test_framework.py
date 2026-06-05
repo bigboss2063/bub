@@ -190,25 +190,29 @@ telegram:
 
 
 def test_load_hooks_initializes_callable_plugins_after_config_load(
-    monkeypatch: pytest.MonkeyPatch, write_config
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, write_config
 ) -> None:
     with patch.dict(os.environ, {}, clear=True):
         framework = BubFramework(config_file=write_config("model: openai:gpt-5"))
 
-        class SettingsAwarePlugin:
-            def __init__(self, _framework: BubFramework) -> None:
-                self.model = load_settings().model
+        plugin_dir = tmp_path / "plugins" / "config-plugin"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "bub.toml").write_text(
+            '[plugin]\nname = "config-plugin"\nentry = "config_plugin:SettingsAwarePlugin"\n',
+            encoding="utf-8",
+        )
+        (plugin_dir / "config_plugin.py").write_text(
+            "from bub.builtin.settings import load_settings\n"
+            "class SettingsAwarePlugin:\n"
+            "    def __init__(self, _framework):\n"
+            "        self.model = load_settings().model\n",
+            encoding="utf-8",
+        )
 
-            @hookimpl
-            def register_cli_commands(self, app: typer.Typer) -> None:
-                return None
-
-        entry_point = SimpleNamespace(name="config-plugin", load=lambda: SettingsAwarePlugin)
-        monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-
+        framework._plugin_mgr.plugin_dirs = [tmp_path / "plugins"]
         framework.load_hooks()
 
-    assert framework._plugin_status["config-plugin"].is_success is True
+    assert framework._plugin_status["config-plugin"].ok is True
 
 
 def test_collect_onboard_config_passes_accumulated_updates_to_later_hooks(write_config) -> None:
