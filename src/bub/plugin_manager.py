@@ -131,6 +131,8 @@ class PluginManager:
 
     def _unload(self, name: str) -> PluginState:
         """Unload a plugin by name. Returns the old PluginState."""
+        import shutil
+
         state = self._plugins.get(name)
         if state is None:
             raise KeyError(f"Plugin '{name}' not found")
@@ -144,6 +146,10 @@ class PluginManager:
 
         for mod_name in state.modules:
             sys.modules.pop(mod_name, None)
+
+        cache_dir = state.spec.path / "__pycache__"
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
 
         del self._plugins[name]
         return state

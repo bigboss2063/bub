@@ -1,470 +1,232 @@
-"""Tests for the reload.plugins command and plugin tool tracking."""
+"""Tests for the reload.plugins command and plugin lifecycle via filesystem scanning."""
 from __future__ import annotations
 
-import importlib.metadata
+import shutil
+import sys
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+from republic import ToolContext
 
-from bub.framework import BubFramework
+from bub.builtin.tools import reload_plugins, show_help
+from bub.framework import BubFramework, PluginStatus
 from bub.hookspecs import hookimpl
+from bub.plugin_manager import PluginStatusCode
+from bub.tools import REGISTRY
 
 
-def test_load_hooks_tracks_plugin_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """load_hooks should record which REGISTRY keys each plugin introduced."""
-    framework = BubFramework()
+def _make_plugin_dir(tmp_path: Path) -> Path:
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir(exist_ok=True)
+    return plugin_dir
 
-    class ToolPlugin:
-        def __init__(self, fw):
-            from bub.tools import tool as bub_tool
 
-            @bub_tool(name="my_test_tool")
-            def my_tool() -> str:
-                return "done"
-
-    entry_point = SimpleNamespace(
-        name="tool-plugin",
-        load=lambda: ToolPlugin,
-        value="some_module:ToolPlugin",
+def _write_plugin(
+    plugin_dir: Path,
+    name: str,
+    class_name: str,
+    code: str,
+    *,
+    manifest_extra: str = "",
+) -> Path:
+    plugin_path = plugin_dir / name
+    plugin_path.mkdir(exist_ok=True)
+    (plugin_path / "bub.toml").write_text(
+        f'[plugin]\nname = "{name}"\nentry = "{name}:{class_name}"\n{manifest_extra}',
+        encoding="utf-8",
     )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+    (plugin_path / f"{name}.py").write_text(code, encoding="utf-8")
+    return plugin_path
 
+
+def _setup_framework(tmp_path: Path) -> BubFramework:
+    plugin_dir = _make_plugin_dir(tmp_path)
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
     framework.load_hooks()
-
-    assert "tool-plugin" in framework._plugin_tools
-    assert "builtin" in framework._plugin_tools
-    assert "my_test_tool" in framework._plugin_tools["tool-plugin"]
+    return framework
 
 
-def test_clear_plugin_modules_removes_cached_entries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_clear_plugin_modules should remove plugin modules from sys.modules."""
-    import sys
-
-    from bub.framework import _clear_plugin_modules
-
-    # Simulate cached plugin modules
-    sys.modules["fake_plugin"] = type(sys)("fake_plugin")
-    sys.modules["fake_plugin.sub"] = type(sys)("fake_plugin.sub")
-    sys.modules["unrelated"] = type(sys)("unrelated")
-
-    _clear_plugin_modules("fake_plugin:SomeClass")
-
-    assert "fake_plugin" not in sys.modules
-    assert "fake_plugin.sub" not in sys.modules
-    assert "unrelated" in sys.modules  # untouched
-
-    # Cleanup
-    sys.modules.pop("unrelated", None)
+def test_load_hooks_loads_builtin(tmp_path: Path) -> None:
+    framework = _setup_framework(tmp_path)
+    assert "builtin" in framework._plugin_status
+    assert framework._plugin_status["builtin"].ok
 
 
-def test_reload_hooks_reregisters_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """reload_hooks should unregister and re-register external plugins."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-        @hookimpl
-        def system_prompt(self, prompt, state):
-            return "v1"
-
-    entry_point = SimpleNamespace(
-        name="my-plugin",
-        load=lambda: PluginV1,
-        value="my_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    # Verify initial load
-    prompt = framework.get_system_prompt(prompt="hello", state={})
-    assert "v1" in prompt
-
-    # Reload — entry_point still returns PluginV1
+def test_reload_hooks_with_no_external_plugins(tmp_path: Path) -> None:
+    framework = _setup_framework(tmp_path)
     status = framework.reload_hooks()
-
-    assert status["my-plugin"].is_success is True
-    prompt = framework.get_system_prompt(prompt="hello", state={})
-    assert "v1" in prompt
+    assert "builtin" in status
+    assert status["builtin"].ok
 
 
-def test_reload_hooks_keeps_old_plugin_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If a plugin fails to reload, its old version should be preserved."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-        @hookimpl
-        def system_prompt(self, prompt, state):
-            return "v1"
-
-    entry_point = SimpleNamespace(
-        name="my-plugin",
-        load=lambda: PluginV1,
-        value="my_plugin:PluginV1",
+def test_reload_hooks_reloads_external_plugin(tmp_path: Path) -> None:
+    plugin_dir = _make_plugin_dir(tmp_path)
+    _write_plugin(
+        plugin_dir,
+        "my_plugin",
+        "MyPlugin",
+        "class MyPlugin:\n    def __init__(self, fw): pass\n",
     )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
     framework.load_hooks()
 
-    # Now make reload fail
-    call_count = [1]
-    original_load = entry_point.load
-
-    def failing_load():
-        call_count[0] += 1
-        if call_count[0] > 1:
-            raise ImportError("plugin broke")
-        return original_load()
-
-    entry_point.load = failing_load
+    assert "my_plugin" in framework._plugin_status
+    assert framework._plugin_status["my_plugin"].ok
 
     status = framework.reload_hooks()
+    assert status["my_plugin"].ok
+    assert status["my_plugin"].code == PluginStatusCode.LOADED
 
-    assert status["my-plugin"].is_success is False
-    assert "plugin broke" in status["my-plugin"].detail
-    # Old plugin still works
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("my_plugin"):
+            del sys.modules[mod]
+
+
+def test_reload_hooks_keeps_old_plugin_on_failure(tmp_path: Path) -> None:
+    plugin_dir = _make_plugin_dir(tmp_path)
+    plugin_path = _write_plugin(
+        plugin_dir,
+        "fail_plugin",
+        "FailPlugin",
+        "from bub.hookspecs import hookimpl\n"
+        "class FailPlugin:\n"
+        "    def __init__(self, fw): pass\n"
+        "    @hookimpl\n"
+        "    def system_prompt(self, prompt, state):\n"
+        "        return 'v1'\n",
+    )
+
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
+    framework.load_hooks()
+
     prompt = framework.get_system_prompt(prompt="hello", state={})
     assert "v1" in prompt
 
+    (plugin_path / "fail_plugin.py").write_text("raise SyntaxError('plugin broke')\n", encoding="utf-8")
 
-def test_reload_hooks_removes_old_tools_and_registers_new_ones(monkeypatch: pytest.MonkeyPatch) -> None:
-    """After reload, old plugin tools should be gone and new ones registered."""
-    from bub.tools import REGISTRY
+    status = framework.reload_hooks()
+    assert not status["fail_plugin"].ok
+    assert "plugin broke" in status["fail_plugin"].detail
 
-    framework = BubFramework()
-    call_count = [0]
+    prompt = framework.get_system_prompt(prompt="hello", state={})
+    assert "v1" in prompt
 
-    class PluginV1:
-        def __init__(self, fw):
-            pass
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("fail_plugin"):
+            del sys.modules[mod]
 
-    def load_plugin():
-        from bub.tools import tool as bub_tool
 
-        call_count[0] += 1
-        if call_count[0] == 1:
-
-            @bub_tool(name="plugin_v1_tool")
-            def old_tool() -> str:
-                return "v1"
-        else:
-
-            @bub_tool(name="plugin_v2_tool")
-            def new_tool() -> str:
-                return "v2"
-
-        return PluginV1
-
-    entry_point = SimpleNamespace(
-        name="versioned-plugin",
-        load=load_plugin,
-        value="versioned_plugin:PluginV1",
+def test_reload_hooks_detects_removed_plugin(tmp_path: Path) -> None:
+    plugin_dir = _make_plugin_dir(tmp_path)
+    plugin_path = _write_plugin(
+        plugin_dir,
+        "removed_plugin",
+        "RemovedPlugin",
+        "class RemovedPlugin:\n    def __init__(self, fw): pass\n",
     )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
+
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
     framework.load_hooks()
 
-    assert "plugin_v1_tool" in REGISTRY
-    assert "plugin_v2_tool" not in REGISTRY
+    assert "removed_plugin" in framework._plugin_status
+
+    shutil.rmtree(plugin_path)
+
+    status = framework.reload_hooks()
+    assert status["removed_plugin"].ok
+    assert status["removed_plugin"].code == PluginStatusCode.REMOVED
+
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("removed_plugin"):
+            del sys.modules[mod]
+
+
+def test_reload_hooks_detects_new_plugin(tmp_path: Path) -> None:
+    plugin_dir = _make_plugin_dir(tmp_path)
+
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
+    framework.load_hooks()
+
+    _write_plugin(
+        plugin_dir,
+        "new_plugin",
+        "NewPlugin",
+        "class NewPlugin:\n    def __init__(self, fw): pass\n",
+    )
+
+    status = framework.reload_hooks()
+    assert "new_plugin" in status
+    assert status["new_plugin"].ok
+    assert status["new_plugin"].code == PluginStatusCode.LOADED
+
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("new_plugin"):
+            del sys.modules[mod]
+
+
+def test_reload_hooks_swaps_tools_on_reload(tmp_path: Path) -> None:
+    plugin_dir = _make_plugin_dir(tmp_path)
+    plugin_path = _write_plugin(
+        plugin_dir,
+        "swap_plugin",
+        "SwapPlugin",
+        "from bub.tools import tool\n"
+        "class SwapPlugin:\n"
+        "    def __init__(self, fw): pass\n"
+        "@tool(name='swap_tool_v1')\n"
+        "def v1_tool() -> str:\n"
+        "    return 'v1'\n",
+    )
+
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    framework._plugin_mgr.plugin_dirs = [plugin_dir]
+    framework.load_hooks()
+
+    assert "swap_tool_v1" in REGISTRY
+
+    (plugin_path / "swap_plugin.py").write_text(
+        "from bub.tools import tool\n"
+        "class SwapPlugin:\n"
+        "    def __init__(self, fw): pass\n"
+        "@tool(name='swap_tool_v2')\n"
+        "def v2_tool() -> str:\n"
+        "    return 'v2'\n",
+        encoding="utf-8",
+    )
 
     framework.reload_hooks()
 
-    assert "plugin_v1_tool" not in REGISTRY
-    assert "plugin_v2_tool" in REGISTRY
-
-    REGISTRY.pop("plugin_v2_tool", None)
-
-
-def test_reload_plugins_drops_orphaned_tools_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If a renamed tool is registered in __init__ and reload fails, the new tool
-    must not leak into REGISTRY and the old tool must be restored."""
-    from bub.tools import REGISTRY
-
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-    call_count = [0]
-    fail_next_register = [False]
-
-    def load_plugin():
-        from bub.tools import tool as bub_tool
-
-        call_count[0] += 1
-        if call_count[0] == 1:
-
-            @bub_tool(name="renamed_plugin_old")
-            def old_tool() -> str:
-                return "v1"
-        else:
-
-            @bub_tool(name="renamed_plugin_new")
-            def new_tool() -> str:
-                return "v2"
-            fail_next_register[0] = True
-
-        return PluginV1
-
-    def failing_register(plugin, name):
-        if fail_next_register[0] and name == "renamed-plugin":
-            fail_next_register[0] = False
-            raise RuntimeError("register blew up")
-        return original_register(plugin, name=name)
-
-    entry_point = SimpleNamespace(
-        name="renamed-plugin",
-        load=load_plugin,
-        value="renamed_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    assert "renamed_plugin_old" in REGISTRY
-    assert "renamed_plugin_new" not in REGISTRY
-
-    # Force the reload's register() to fail so the new tool added in __init__
-    # would otherwise be left behind in REGISTRY. The restore call must still
-    # succeed.
-    original_register = framework._plugin_manager.register
-    framework._plugin_manager.register = failing_register  # type: ignore[method-assign]
-
-    try:
-        status = framework.reload_hooks()
-    finally:
-        framework._plugin_manager.register = original_register  # type: ignore[method-assign]
-
-    assert status["renamed-plugin"].is_success is False
-    assert "renamed_plugin_new" not in REGISTRY, "orphaned tool leaked into REGISTRY"
-    assert "renamed_plugin_old" in REGISTRY, "old tool not restored after rollback"
-
-    REGISTRY.pop("renamed_plugin_old", None)
-
-
-def test_reload_plugins_with_no_external_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """reload_plugins with only builtin plugins should return status without error."""
-    framework = BubFramework()
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [])
-
-    framework.load_hooks()
-    status = framework.reload_hooks()
-
-    assert "builtin" in status
-    assert status["builtin"].is_success is True
-
-
-def test_reload_hooks_treats_deleted_plugin_as_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If a plugin's module is deleted from disk, reload should mark it as removed, not failed."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-        @hookimpl
-        def system_prompt(self, prompt, state):
-            return "v1"
-
-    call_count = [0]
-
-    def load_plugin():
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return PluginV1
-        raise ModuleNotFoundError("No module named 'deleted_plugin'")
-
-    entry_point = SimpleNamespace(
-        name="deleted-plugin",
-        load=load_plugin,
-        value="deleted_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    prompt = framework.get_system_prompt(prompt="hello", state={})
-    assert "v1" in prompt
-
-    status = framework.reload_hooks()
-
-    assert status["deleted-plugin"].is_success is True
-    assert status["deleted-plugin"].detail == "removed"
-
-
-def test_reload_hooks_treats_file_not_found_as_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """FileNotFoundError during reload should also be treated as removed."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-    call_count = [0]
-
-    def load_plugin():
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return PluginV1
-        raise FileNotFoundError("plugin directory not found")
-
-    entry_point = SimpleNamespace(
-        name="missing-plugin",
-        load=load_plugin,
-        value="missing_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    status = framework.reload_hooks()
-
-    assert status["missing-plugin"].is_success is True
-    assert status["missing-plugin"].detail == "removed"
-
-
-def test_reload_hooks_non_import_error_still_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-filesystem errors (e.g. RuntimeError) should still trigger rollback."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-        @hookimpl
-        def system_prompt(self, prompt, state):
-            return "v1"
-
-    call_count = [0]
-
-    def load_plugin():
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return PluginV1
-        raise RuntimeError("unexpected error")
-
-    entry_point = SimpleNamespace(
-        name="error-plugin",
-        load=load_plugin,
-        value="error_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    status = framework.reload_hooks()
-
-    assert status["error-plugin"].is_success is False
-    assert "unexpected error" in status["error-plugin"].detail
-    prompt = framework.get_system_prompt(prompt="hello", state={})
-    assert "v1" in prompt
-
-
-def test_reload_hooks_new_plugin_module_not_found_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A never-loaded plugin that raises ModuleNotFoundError should be marked as failed, not removed."""
-    framework = BubFramework()
-
-    def load_plugin():
-        raise ModuleNotFoundError("No module named 'fresh_plugin'")
-
-    entry_point = SimpleNamespace(
-        name="fresh-plugin",
-        load=load_plugin,
-        value="fresh_plugin:Plugin",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-
-    framework.load_hooks()
-
-    assert framework._plugin_status["fresh-plugin"].is_success is False
-
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    status = framework.reload_hooks()
-
-    assert status["fresh-plugin"].is_success is False
-    assert "No module named 'fresh_plugin'" in status["fresh-plugin"].detail
-
-
-def test_reload_hooks_new_plugin_file_not_found_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A never-loaded plugin that raises FileNotFoundError should be marked as failed, not removed."""
-    framework = BubFramework()
-
-    def load_plugin():
-        raise FileNotFoundError("plugin directory not found")
-
-    entry_point = SimpleNamespace(
-        name="unseen-plugin",
-        load=load_plugin,
-        value="unseen_plugin:Plugin",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-
-    framework.load_hooks()
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    status = framework.reload_hooks()
-
-    assert status["unseen-plugin"].is_success is False
-    assert "plugin directory not found" in status["unseen-plugin"].detail
-
-
-def test_restore_plugin_does_not_track_tools_for_failed_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rollback of a previously-failed plugin should not add it to _plugin_tools."""
-    framework = BubFramework()
-
-    class PluginV1:
-        def __init__(self, fw):
-            pass
-
-        @hookimpl
-        def system_prompt(self, prompt, state):
-            return "v1"
-
-    call_count = [0]
-
-    def load_plugin():
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return PluginV1
-        raise RuntimeError("plugin broke")
-
-    entry_point = SimpleNamespace(
-        name="my-plugin",
-        load=load_plugin,
-        value="my_plugin:PluginV1",
-    )
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: [entry_point])
-    framework.load_hooks()
-
-    assert "my-plugin" in framework._plugin_tools
-
-    status = framework.reload_hooks()
-
-    assert status["my-plugin"].is_success is False
-    assert "my-plugin" in framework._plugin_tools
-    assert framework._plugin_tools["my-plugin"] == set()
+    assert "swap_tool_v1" not in REGISTRY
+    assert "swap_tool_v2" in REGISTRY
+
+    REGISTRY.pop("swap_tool_v2", None)
+    for mod in list(sys.modules.keys()):
+        if mod.startswith("swap_plugin"):
+            del sys.modules[mod]
 
 
 @pytest.mark.asyncio
 async def test_reload_plugins_tool_returns_formatted_report() -> None:
-    """The reload.plugins tool should return a human-readable status report."""
-    from republic import ToolContext
-
-    from bub.builtin.tools import reload_plugins
-    from bub.framework import PluginStatus
-
     framework = BubFramework()
     expected_status = {
-        "builtin": PluginStatus(is_success=True),
-        "good-plugin": PluginStatus(is_success=True),
-        "bad-plugin": PluginStatus(is_success=False, detail="ImportError: no mod"),
+        "builtin": PluginStatus(ok=True, code=PluginStatusCode.LOADED),
+        "good-plugin": PluginStatus(ok=True, code=PluginStatusCode.LOADED),
+        "bad-plugin": PluginStatus(ok=False, code=PluginStatusCode.FAILED, detail="ImportError: no mod"),
     }
 
     class FakeAgent:
-        def __init__(self, framework: BubFramework):
-            self.framework = framework
+        def __init__(self, fw: BubFramework):
+            self.framework = fw
 
     context = ToolContext(state={"_runtime_agent": FakeAgent(framework)}, tape="test", run_id="test")
-
-    from unittest.mock import patch
 
     with patch.object(framework, "reload_hooks", return_value=expected_status):
         result = await reload_plugins.run(context=context)
@@ -478,25 +240,17 @@ async def test_reload_plugins_tool_returns_formatted_report() -> None:
 
 @pytest.mark.asyncio
 async def test_reload_plugins_tool_shows_removed_status() -> None:
-    """The reload.plugins tool should show '\\u2013' for removed plugins."""
-    from republic import ToolContext
-
-    from bub.builtin.tools import reload_plugins
-    from bub.framework import PluginStatus
-
     framework = BubFramework()
     expected_status = {
-        "builtin": PluginStatus(is_success=True),
-        "deleted-plugin": PluginStatus(is_success=True, detail="removed"),
+        "builtin": PluginStatus(ok=True, code=PluginStatusCode.LOADED),
+        "deleted-plugin": PluginStatus(ok=True, code=PluginStatusCode.REMOVED),
     }
 
     class FakeAgent:
-        def __init__(self, framework: BubFramework):
-            self.framework = framework
+        def __init__(self, fw: BubFramework):
+            self.framework = fw
 
     context = ToolContext(state={"_runtime_agent": FakeAgent(framework)}, tape="test", run_id="test")
-
-    from unittest.mock import patch
 
     with patch.object(framework, "reload_hooks", return_value=expected_status):
         result = await reload_plugins.run(context=context)
@@ -507,7 +261,4 @@ async def test_reload_plugins_tool_shows_removed_status() -> None:
 
 @pytest.mark.asyncio
 async def test_show_help_lists_reload_plugins_command() -> None:
-    """help should list the reload.plugins internal command."""
-    from bub.builtin.tools import show_help
-
     assert ",reload.plugins" in await show_help.run()
