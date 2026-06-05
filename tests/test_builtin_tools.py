@@ -199,12 +199,12 @@ async def test_tape_compact_tool(tmp_path: Path) -> None:
     from bub.builtin.compaction.types import CompactionResult
 
     agent = MagicMock()
-    agent.tapes.handoff = AsyncMock(
-        return_value=CompactionResult(summary="## Goal\nDone", last_entry_before=5, tokens_before=1000)
+    agent.tapes.compact = AsyncMock(
+        return_value=CompactionResult(summary="## Goal\nDone", cut_index=2, tokens_before=1000)
     )
     ctx = _tool_context(tmp_path)
     ctx.state["_runtime_agent"] = agent
 
     from bub.tools import REGISTRY
-    compact_tool = REGISTRY.get("tape.handoff")
+    compact_tool = REGISTRY.get("tape.compact")
     assert compact_tool is not None

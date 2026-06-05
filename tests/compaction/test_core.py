@@ -103,7 +103,8 @@ async def test_compact_writes_anchor_and_returns_result() -> None:
     result = await compact(llm, "tape1", entries, settings, reason="threshold", write_anchor=fake_write_anchor)
     assert result is not None
     assert result.summary == "## Goal\nTest"
-    assert result.last_entry_before > 0
+    assert result.cut_index > 0
+    assert result.tokens_before > 0
     assert len(anchor_calls) == 1
-    assert anchor_calls[0][0] == "compaction/v1"
+    assert anchor_calls[0][0] == "compact"
     assert anchor_calls[0][1]["trigger"] == "threshold"

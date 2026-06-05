@@ -19,19 +19,7 @@ def _select_messages(entries: Iterable[TapeEntry], _context: TapeContext) -> lis
     messages: list[dict[str, Any]] = []
     pending_calls: list[dict[str, Any]] = []
 
-    entry_list = list(entries)
-
-    compaction_summary = _context.state.get("compaction_summary")
-    if compaction_summary:
-        last_before = _context.state.get("compaction_last_entry_before", 0)
-        tokens_before = _context.state.get("compaction_tokens_before", 0)
-        messages.append({
-            "role": "user",
-            "content": _render_compaction_summary(str(compaction_summary), tokens_before),
-        })
-        entry_list = [e for e in entry_list if e.id > last_before]
-
-    for entry in entry_list:
+    for entry in entries:
         match entry.kind:
             case "anchor":
                 _append_anchor_entry(messages, entry)
@@ -45,21 +33,30 @@ def _select_messages(entries: Iterable[TapeEntry], _context: TapeContext) -> lis
     return messages
 
 
-def _render_compaction_summary(summary: str, tokens_before: int) -> str:
+def _render_compact_summary(summary: str, tokens_before: int) -> str:
     return (
-        "<compaction-summary>\n"
+        "<compact-summary>\n"
         f"<tokens-before>{tokens_before}</tokens-before>\n"
         "<summary>\n"
         f"{summary}\n"
         "</summary>\n"
-        "</compaction-summary>"
+        "</compact-summary>"
     )
 
 
 def _append_anchor_entry(messages: list[dict[str, Any]], entry: TapeEntry) -> None:
     payload = entry.payload
-    content = f"[Anchor created: {payload.get('name')}]: {json.dumps(payload.get('state'), ensure_ascii=False)}"
-    messages.append({"role": "assistant", "content": content})
+    state = payload.get("state")
+    if isinstance(state, dict) and "summary" in state:
+        summary = state["summary"]
+        tokens_before = state.get("tokens_before", 0)
+        messages.append({
+            "role": "user",
+            "content": _render_compact_summary(str(summary), int(tokens_before)),
+        })
+    else:
+        content = f"[Anchor created: {payload.get('name')}]: {json.dumps(state, ensure_ascii=False)}"
+        messages.append({"role": "assistant", "content": content})
 
 
 def _append_message_entry(messages: list[dict[str, Any]], entry: TapeEntry) -> None:

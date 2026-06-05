@@ -260,18 +260,16 @@ def _find_previous_compaction_boundary(entries: list[TapeEntry]) -> tuple[str | 
     previous_summary: str | None = None
     boundary_start = 0
     for entry in reversed(entries):
-        if entry.kind == "anchor" and entry.payload.get("name", "").startswith("compaction/"):
+        if entry.kind == "anchor" and entry.payload.get("name", "").startswith("compact"):
             state = entry.payload.get("state", {})
             if isinstance(state, dict):
                 previous_summary = state.get("summary")
-                last_before = state.get("last_entry_before")
-                if isinstance(last_before, int):
-                    for idx, e in enumerate(entries):
-                        if e.id > last_before:
-                            boundary_start = idx
-                            break
-                    else:
-                        boundary_start = len(entries)
+            # The retained entries are re-appended after the compact anchor,
+            # so boundary_start is the index right after it.
+            for idx, e in enumerate(entries):
+                if e is entry:
+                    boundary_start = idx + 1
+                    break
             break
     return previous_summary, boundary_start
 
@@ -320,17 +318,15 @@ async def compact(
         llm, to_summarize, boundary_start, cut, file_ops, previous_summary, instructions
     )
 
-    last_entry_before = entries[cut.cut_index - 1].id
     tokens_before = sum(
         estimate_tokens(e.payload) for e in to_summarize if e.kind == "message"
     )
 
     if write_anchor is not None:
         await write_anchor(
-            "compaction/v1",
+            "compact",
             state={
                 "summary": summary,
-                "last_entry_before": last_entry_before,
                 "tokens_before": tokens_before,
                 "details": {
                     "read_files": sorted(file_ops.read),
@@ -342,6 +338,6 @@ async def compact(
 
     return CompactionResult(
         summary=summary,
-        last_entry_before=last_entry_before,
         tokens_before=tokens_before,
+        cut_index=cut.cut_index,
     )

@@ -12,8 +12,8 @@ class CompactionResult:
     """Result of a compaction operation."""
 
     summary: str
-    last_entry_before: int
     tokens_before: int
+    cut_index: int
 
 
 @dataclass(frozen=True)

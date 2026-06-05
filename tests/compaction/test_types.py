@@ -31,9 +31,9 @@ def test_compaction_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_compaction_result_is_frozen() -> None:
-    r = CompactionResult(summary="test", last_entry_before=42, tokens_before=1000)
+    r = CompactionResult(summary="test", cut_index=4, tokens_before=1000)
     assert r.summary == "test"
-    assert r.last_entry_before == 42
+    assert r.cut_index == 4
     assert r.tokens_before == 1000
     with pytest.raises(AttributeError):
         r.summary = "changed"  # type: ignore[misc]

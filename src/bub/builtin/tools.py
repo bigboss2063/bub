@@ -225,13 +225,29 @@ async def tape_reset(archive: bool = False, *, context: ToolContext) -> str:
 
 
 @tool(context=True, name="tape.handoff")
-async def tape_handoff(instructions: str = "", *, context: ToolContext) -> str:
-    """Run handoff on the current tape to summarize history and free context space."""
+async def tape_handoff(name: str, state: str = "", *, context: ToolContext) -> str:
+    """Write a handoff anchor to mark a phase transition. State is an optional JSON string."""
     agent = _get_agent(context)
-    result = await agent.tapes.handoff(context.tape or "", reason="manual", instructions=instructions or None)
+    import json as _json
+
+    parsed_state: dict | None = None
+    if state.strip():
+        try:
+            parsed_state = _json.loads(state)
+        except _json.JSONDecodeError:
+            parsed_state = {"note": state}
+    await agent.tapes.handoff(context.tape or "", name=name, state=parsed_state)
+    return f"handoff: {name}"
+
+
+@tool(context=True, name="tape.compact")
+async def tape_compact(instructions: str = "", *, context: ToolContext) -> str:
+    """Compact the tape: summarize history and free context space."""
+    agent = _get_agent(context)
+    result = await agent.tapes.compact(context.tape or "", reason="manual", instructions=instructions or None)
     if result is None:
-        return "handoff skipped: nothing to compact"
-    return f"handoff complete: {result.tokens_before} tokens summarized"
+        return "compact skipped: nothing to compact"
+    return f"compact complete: {result.tokens_before} tokens summarized"
 
 
 @tool(context=True, name="tape.anchors")
@@ -299,7 +315,8 @@ def show_help() -> str:
         "  ,skill name=foo\n"
         "  ,tape.info\n"
         "  ,tape.search query=error\n"
-        "  ,tape.handoff instructions='focus on errors'\n"
+        "  ,tape.handoff name=phase-1 state='{\"note\": \"checkpoint\"}'\n"
+        "  ,tape.compact instructions='focus on errors'\n"
         "  ,tape.anchors\n"
         "  ,fs.read path=README.md\n"
         "  ,fs.write path=tmp.txt content='hello'\n"

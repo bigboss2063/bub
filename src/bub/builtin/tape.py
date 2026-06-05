@@ -2,7 +2,7 @@ import contextlib
 import hashlib
 import json
 from collections.abc import AsyncGenerator
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -112,15 +112,27 @@ class TapeService:
         self,
         tape_name: str,
         *,
+        name: str,
+        state: dict[str, object] | None = None,
+    ) -> None:
+        """Write a generic handoff anchor. This is the core handoff primitive."""
+        tape = self._llm.tape(tape_name)
+        await tape.handoff_async(name, state=state)
+
+    async def compact(
+        self,
+        tape_name: str,
+        *,
         reason: str = "manual",
         instructions: str | None = None,
     ) -> CompactionResult | None:
+        """Compact is a handoff strategy: summarize history, re-append retained entries."""
         tape = self._llm.tape(tape_name)
         entries = list(await tape.query_async.all())
         settings = ensure_config(CompactionSettings)
 
-        async def write_anchor(name: str, state: dict) -> None:
-            await tape.handoff_async(name, state=state)
+        async def write_anchor(anchor_name: str, state: dict) -> None:
+            await tape.handoff_async(anchor_name, state=state)
 
         result = await _run_compaction(
             self._llm,
@@ -132,12 +144,15 @@ class TapeService:
             write_anchor=write_anchor,
         )
         if result is not None:
-            tape.context = replace(tape.context, state={
-                **tape.context.state,
-                "compaction_summary": result.summary,
-                "compaction_last_entry_before": result.last_entry_before,
-                "compaction_tokens_before": result.tokens_before,
-            })
+            retained = entries[result.cut_index :]
+            for entry in retained:
+                reappend = TapeEntry(
+                    id=0,
+                    kind=entry.kind,
+                    payload=dict(entry.payload),
+                    meta={**entry.meta, "carried_from": entry.id},
+                )
+                await tape.append_async(reappend)
         return result
 
     async def search(self, query: TapeQuery[AsyncTapeStore]) -> list[TapeEntry]:

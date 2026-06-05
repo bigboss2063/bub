@@ -522,12 +522,12 @@ class Agent:
             settings = ensure_config(CompactionSettings)
             if settings.enabled and should_compact(total_tokens, settings.context_window, settings):
                 logger.info("compaction: threshold reached, triggering proactive compaction. tape={}", tape.name)
-                await self.tapes.handoff(tape.name, reason="threshold")
+                await self.tapes.compact(tape.name, reason="threshold")
                 compact_cooldown = COMPACT_COOLDOWN_STEPS
 
         if can_overflow_compact and _is_context_length_error(error):
             logger.warning("compaction: context overflow, triggering compaction. tape={} step={}", tape.name, step)
-            await self.tapes.handoff(tape.name, reason="overflow")
+            await self.tapes.compact(tape.name, reason="overflow")
             await self.tapes.append_event(tape.name, "loop.step", {
                 "step": step,
                 "elapsed_ms": elapsed_ms,
