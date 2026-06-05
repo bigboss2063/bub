@@ -40,10 +40,8 @@ class BubFramework:
         plugin_dirs = [
             self.workspace / ".bub" / "plugins",
         ]
-        try:
+        with contextlib.suppress(RuntimeError):
             plugin_dirs.append(Path.home() / ".bub" / "plugins")
-        except RuntimeError:
-            pass
 
         self._plugin_mgr = PluginManager(self, plugin_dirs)
         self._hook_runtime = HookRuntime(self._plugin_mgr.pluggy_manager)
