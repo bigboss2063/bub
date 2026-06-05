@@ -158,6 +158,11 @@ class BubFramework:
             before = set(REGISTRY.keys())
             try:
                 self._reload_plugin_from_entry_point(entry_point)
+            except (ModuleNotFoundError, FileNotFoundError) as exc:
+                logger.info(f"Plugin '{plugin_name}' removed from filesystem: {exc}")
+                for tool_name in set(REGISTRY.keys()) - before:
+                    REGISTRY.pop(tool_name, None)
+                reloaded_status[plugin_name] = PluginStatus(is_success=True, detail="removed")
             except Exception as exc:
                 logger.warning(f"Failed to reload plugin '{plugin_name}': {exc}")
                 for tool_name in set(REGISTRY.keys()) - before:
